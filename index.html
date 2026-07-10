@@ -2,6 +2,7 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>效期登打</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
 <script>
@@ -44,6 +45,20 @@
   }
   header h1 { font-size: 18px; font-weight: 700; letter-spacing: 2px; }
   header .date { font-size: 13px; opacity: .85; }
+  #pendingBadge {
+    display: none; font-size: 11px; font-weight: 400; vertical-align: middle;
+    background: rgba(255,255,255,.25); border-radius: 10px; padding: 2px 8px; margin-left: 6px;
+  }
+  .fail-item {
+    background: var(--red-pale); border: 1.5px solid var(--red); color: var(--red);
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;
+    font-size: 14px; font-weight: 600;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  }
+  .fail-item button {
+    border: 1px solid var(--red); color: #fff; background: var(--red);
+    border-radius: 8px; padding: 7px 14px; font-size: 14px; font-weight: 700; flex-shrink: 0;
+  }
   main { max-width: 480px; margin: 0 auto; padding: 16px; }
 
   .field { margin-bottom: 14px; }
@@ -221,7 +236,7 @@
 </head>
 <body>
 <header>
-  <h1>效期登打</h1>
+  <h1>效期登打 <span id="pendingBadge"></span></h1>
   <span class="date" id="todayDate"></span>
 </header>
 
@@ -229,6 +244,7 @@
   <div id="loading">載入商品主檔中…</div>
 
   <div id="form" style="display:none">
+    <div id="failBox"></div>
     <div class="field">
       <label for="user">登打人</label>
       <input id="user" type="text" placeholder="姓名" autocomplete="off">
@@ -816,13 +832,62 @@
   }
   $('user').addEventListener('input', updateBtn);
 
-  // ── 送出 ──
+  // ── 送出 (樂觀更新:立即重置畫面,背景傳送) ──
+  var pendingCount = 0;
+
+  function updatePendingBadge() {
+    var el = $('pendingBadge');
+    if (pendingCount > 0) {
+      el.style.display = 'inline-block';
+      el.textContent = '傳送中 ' + pendingCount;
+    } else {
+      el.style.display = 'none';
+    }
+  }
+
+  function sendInBackground(payload, retryLeft) {
+    pendingCount++;
+    updatePendingBadge();
+    apiPost({ action: 'submit', payload: payload })
+      .then(function () {
+        pendingCount--;
+        updatePendingBadge();
+        loadToday();
+      })
+      .catch(function (e) {
+        if (retryLeft > 0) {
+          // 自動重試一次 (2秒後)
+          setTimeout(function () {
+            pendingCount--;
+            sendInBackground(payload, retryLeft - 1);
+            updatePendingBadge();
+          }, 2000);
+          return;
+        }
+        pendingCount--;
+        updatePendingBadge();
+        showFailBanner(payload, e);
+      });
+  }
+
+  function showFailBanner(payload, err) {
+    var box = $('failBox');
+    var div = document.createElement('div');
+    div.className = 'fail-item';
+    var msg = document.createElement('div');
+    msg.textContent = '⚠ 未送出:' + payload.name + '(' + payload.items.map(function (i) { return i.expiry; }).join('、') + ')';
+    var retry = document.createElement('button');
+    retry.textContent = '重送';
+    retry.onclick = function () { div.remove(); sendInBackground(payload, 1); };
+    div.appendChild(msg); div.appendChild(retry);
+    box.appendChild(div);
+    if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+  }
+
   $('submitBtn').addEventListener('click', function () {
-    var btn = this;
     var items = collectItems();
     if (!items) return;
 
-    btn.disabled = true; btn.textContent = '送出中…';
     var user = $('user').value.trim();
     localStorage.setItem('entryUser', user);
 
@@ -834,24 +899,20 @@
       items: items
     };
 
-    apiPost({ action: 'submit', payload: payload })
-      .then(function () {
-        toast('✓ 已登打 ' + items.length + ' 筆:' + payload.name);
-        $('code').value = '';
-        $('nameCard').className = ''; $('nameCard').textContent = '輸入貨號或掃條碼';
-        hideHistory();
-        existingExpiries = {};
-        $('expRows').innerHTML = '';
-        matched = false;
-        addRow();
-        btn.textContent = '送 出'; updateBtn();
-        $('code').focus();
-        loadToday();
-      })
-      .catch(function (e) {
-        toast('送出失敗:' + e.message);
-        btn.textContent = '送 出'; btn.disabled = false;
-      });
+    // 立即重置畫面,可馬上打下一筆
+    toast('✓ 已登打 ' + items.length + ' 筆:' + payload.name);
+    $('code').value = '';
+    $('nameCard').className = ''; $('nameCard').textContent = '輸入貨號或掃條碼';
+    hideHistory();
+    existingExpiries = {};
+    $('expRows').innerHTML = '';
+    matched = false;
+    addRow();
+    updateBtn();
+    $('code').focus();
+
+    // 背景傳送 (失敗自動重試一次,再失敗顯示警告)
+    sendInBackground(payload, 1);
   });
 
   // ── 今日紀錄 ──
