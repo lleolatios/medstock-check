@@ -286,6 +286,20 @@
 
 <div id="toast"></div>
 
+<div id="bindOverlay" style="display:none; position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.6); align-items:center; justify-content:center; padding:20px;">
+  <div style="background:#fff; border-radius:14px; padding:18px; width:100%; max-width:420px;">
+    <div style="font-size:16px; font-weight:700; color:var(--green-dark); margin-bottom:4px;">綁定新條碼</div>
+    <div style="font-size:13px; color:#6b7a72; margin-bottom:12px;">條碼:<span id="bindBarcodeText" style="font-weight:700;"></span></div>
+    <label style="font-size:14px; font-weight:600; color:var(--green-dark); display:block; margin-bottom:6px;">輸入此商品的貨號(看貨架標籤)</label>
+    <input id="bindCode" type="text" inputmode="numeric" placeholder="例:080201075" autocomplete="off" style="margin-bottom:8px;">
+    <div id="bindName" style="min-height:44px; border-radius:8px; padding:9px 12px; margin-bottom:12px; font-size:15px; font-weight:600; border:1.5px dashed var(--line); color:#8a9a91;">輸入貨號後確認品名</div>
+    <div style="display:flex; gap:10px;">
+      <button id="bindConfirm" type="button" disabled style="flex:1; padding:12px; font-size:16px; font-weight:700; color:#fff; background:var(--green); border:none; border-radius:10px;">確認綁定</button>
+      <button id="bindCancel" type="button" style="flex:1; padding:12px; font-size:16px; font-weight:700; color:var(--red); background:#fff; border:1.5px solid var(--red); border-radius:10px;">取消</button>
+    </div>
+  </div>
+</div>
+
 <div id="scanOverlay">
   <div id="liveReader"></div>
   <div id="scanTip">將條碼對準框內,對到會自動嗶</div>
@@ -520,6 +534,61 @@
     img.src = url;
   });
 
+  // ── 條碼綁定 ──
+  var pendingBarcode = '';
+
+  function openBindPanel(barcode) {
+    pendingBarcode = barcode;
+    $('bindBarcodeText').textContent = barcode;
+    $('bindCode').value = '';
+    $('bindName').textContent = '輸入貨號後確認品名';
+    $('bindName').style.borderColor = 'var(--line)';
+    $('bindName').style.color = '#8a9a91';
+    $('bindConfirm').disabled = true;
+    $('bindOverlay').style.display = 'flex';
+    $('bindCode').focus();
+  }
+  function closeBindPanel() { $('bindOverlay').style.display = 'none'; }
+
+  $('bindCode').addEventListener('input', function () {
+    var c = this.value.trim();
+    var nameBox = $('bindName');
+    if (PRODUCTS[c]) {
+      nameBox.textContent = '✓ ' + PRODUCTS[c].n + '(允退 ' + (PRODUCTS[c].r || '未設定') + ')';
+      nameBox.style.borderColor = 'var(--green)';
+      nameBox.style.color = 'var(--green-dark)';
+      $('bindConfirm').disabled = false;
+    } else {
+      nameBox.textContent = c ? '✗ 查無此貨號' : '輸入貨號後確認品名';
+      nameBox.style.borderColor = c ? 'var(--red)' : 'var(--line)';
+      nameBox.style.color = c ? 'var(--red)' : '#8a9a91';
+      $('bindConfirm').disabled = true;
+    }
+  });
+
+  $('bindCancel').addEventListener('click', closeBindPanel);
+
+  $('bindConfirm').addEventListener('click', function () {
+    var btn = this;
+    var boundCode = $('bindCode').value.trim();
+    if (!PRODUCTS[boundCode] || !pendingBarcode) return;
+    btn.disabled = true; btn.textContent = '綁定中…';
+
+    apiPost({ action: 'bind', payload: { code: boundCode, barcode: pendingBarcode } })
+      .then(function () {
+        BARCODES[pendingBarcode] = boundCode; // 本機立即生效
+        closeBindPanel();
+        toast('✓ 條碼已綁定:' + PRODUCTS[boundCode].n);
+        $('code').value = pendingBarcode;
+        $('code').dispatchEvent(new Event('input')); // 重跑比對 → 直接帶出品名
+        btn.disabled = false; btn.textContent = '確認綁定';
+      })
+      .catch(function (e) {
+        toast('綁定失敗:' + e.message);
+        btn.disabled = false; btn.textContent = '確認綁定';
+      });
+  });
+
   // ── 貨號比對 ──
   var codeTimer;
   $('code').addEventListener('input', function () {
@@ -559,7 +628,19 @@
       clearTimeout(codeTimer);
       codeTimer = setTimeout(function () { loadHistory(code); }, 400);
     } else {
-      card.className = 'bad'; card.textContent = '✗ 查無此貨號/條碼,請確認';
+      card.className = 'bad';
+      var msg = document.createElement('div');
+      msg.textContent = '✗ 查無此貨號/條碼,請確認';
+      card.appendChild(msg);
+      // 長度像條碼 → 提供綁定選項
+      if (/^\d{8,14}$/.test(code)) {
+        var bindBtn = document.createElement('button');
+        bindBtn.type = 'button';
+        bindBtn.textContent = '＋ 這是新條碼,綁定到貨號';
+        bindBtn.style.cssText = 'margin-top:8px;padding:9px 12px;font-size:14px;font-weight:700;color:#fff;background:var(--red);border:none;border-radius:8px;';
+        bindBtn.onclick = function () { openBindPanel(code); };
+        card.appendChild(bindBtn);
+      }
     }
     evalAllRows();
     updateBtn();
