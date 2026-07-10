@@ -737,7 +737,7 @@
   // ── 允退狀態判斷 ──
   // 允退代號說明:
   //   物流 *N:*0=前1個月,*1=前3個月,*2=前4個月…(*N = 前N+2個月);*14/*15=不須退;*16=不可退
-  //   廠商 ^N:^N = 前N個月;^16=不可退
+  //   廠商 ^N/#N:前N個月;16=不可退
   function lastDay(y, m) { return new Date(y, m, 0); }
   function fmtDate(dt) {
     return dt.getFullYear() + '/' + (dt.getMonth() + 1) + '/' + dt.getDate();
@@ -746,7 +746,7 @@
     var code = $('code').value.trim();
     if (!matched) return null;
     var r = (PRODUCTS[code].r || '').trim();
-    var m = r.match(/^([*^])(\d+)$/);
+    var m = r.match(/^([*^#])(\d+)$/);
     if (!m) {
       return { cls: 'no', main: '無法判斷', sub: '允退代號「' + (r || '空白') + '」無法解析', allowDate: '', status: '無法判斷' };
     }
