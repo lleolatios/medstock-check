@@ -250,6 +250,23 @@
       <input id="user" type="text" placeholder="姓名" autocomplete="off">
     </div>
 
+    <div class="field">
+      <label for="area">區域</label>
+      <select id="area" style="width:100%; font-size:18px; padding:12px 14px; border:1.5px solid var(--line); border-radius:10px; background:#fff; -webkit-appearance:none; color:var(--ink);">
+        <option value="" disabled selected>選擇盤點區域</option>
+        <option value="1店-1F">1店-1F</option>
+        <option value="1店-B1-A區">1店-B1-A區</option>
+        <option value="1店-B1-B區">1店-B1-B區</option>
+        <option value="1店-調劑室含冰箱">1店-調劑室含冰箱</option>
+        <option value="1店-波浪架">1店-波浪架</option>
+        <option value="2店-1F">2店-1F</option>
+        <option value="2店-B1">2店-B1</option>
+        <option value="2店-2F">2店-2F</option>
+        <option value="2店-樓梯間">2店-樓梯間</option>
+        <option value="2店-波浪架">2店-波浪架</option>
+      </select>
+    </div>
+
     <div class="field search-wrap">
       <label for="nameSearch">品名搜尋(選填)</label>
       <input id="nameSearch" type="text" placeholder="輸入關鍵字,例:優蛋白" autocomplete="off">
@@ -325,6 +342,12 @@
   var d = new Date();
   $('todayDate').textContent = d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate();
   $('user').value = localStorage.getItem('entryUser') || '';
+  var savedArea = localStorage.getItem('entryArea') || '';
+  if (savedArea) $('area').value = savedArea;
+  $('area').addEventListener('change', function () {
+    localStorage.setItem('entryArea', this.value);
+    updateBtn();
+  });
 
   apiGet({ action: 'products' })
     .then(function (data) {
@@ -710,7 +733,7 @@
       }
       var who = document.createElement('div');
       who.className = 'who';
-      who.textContent = it.date + ' ' + it.user;
+      who.textContent = it.date + ' ' + it.user + (it.area ? ' ' + it.area : '');
       div.appendChild(left); div.appendChild(who);
       body.appendChild(div);
     });
@@ -909,7 +932,7 @@
   }
 
   function updateBtn() {
-    $('submitBtn').disabled = !(matched && collectItems() && $('user').value.trim());
+    $('submitBtn').disabled = !(matched && collectItems() && $('user').value.trim() && $('area').value);
   }
   $('user').addEventListener('input', updateBtn);
 
@@ -977,6 +1000,7 @@
       user: user,
       code: code,
       name: PRODUCTS[code] ? PRODUCTS[code].n : '',
+      area: $('area').value,
       items: items
     };
 
@@ -1016,7 +1040,7 @@
       nm.textContent = it.code + ' ' + it.name;
       var mt = document.createElement('div');
       mt.className = 'meta';
-      mt.textContent = '效期 ' + it.expiry + (it.qty ? ' × ' + it.qty : '') + ' | ' + it.time + ' ' + it.user + ' | ';
+      mt.textContent = '效期 ' + it.expiry + (it.qty ? ' × ' + it.qty : '') + (it.area ? ' | ' + it.area : '') + ' | ' + it.time + ' ' + it.user + ' | ';
       if (it.status) {
         var st = document.createElement('span');
         st.className = stClass(it.status);
