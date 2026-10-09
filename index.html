@@ -6,16 +6,46 @@
 <title>效期登打</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
 <script>
-  var SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyM0p9ArkeIemG8L5e5eN-OPH_xI4dJ3B3Vd_gnqFzLs0QlTARWpXH-kbZKnZgIyKLyAg/exec';
+  // ── 多店設定:網址 ?s=部署ID 決定這支手機連到哪一間店的試算表 ──
+  var DEFAULT_SID = 'AKfycbyM0p9ArkeIemG8L5e5eN-OPH_xI4dJ3B3Vd_gnqFzLs0QlTARWpXH-kbZKnZgIyKLyAg';
+  var FRONTEND_URL = location.origin + location.pathname;
+  var QS = new URLSearchParams(location.search);
+  var SETUP_MODE = QS.has('setup');
+
+  function sidFromAny(v) {
+    v = String(v || '').trim();
+    var m = v.match(/\/s\/([A-Za-z0-9_-]+)\/(exec|dev)/);
+    if (m) return m[1];
+    if (/^[A-Za-z0-9_-]{20,}$/.test(v)) return v;
+    return '';
+  }
+  function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+  var SID = sidFromAny(QS.get('s'));
+  if (SID && !SETUP_MODE) lsSet('storeSid', SID);
+  if (!SID) SID = lsGet('storeSid') || DEFAULT_SID;
+  var SCRIPT_URL = 'https://script.google.com/macros/s/' + SID + '/exec';
+
+  function storeKey() { return lsGet('key_' + SID); }
+
+  function handleJson(j) {
+    if (!j.ok) {
+      var err = new Error(j.error === 'KEY_INVALID' ? '通行碼錯誤' : (j.error || 'API錯誤'));
+      if (j.error === 'KEY_INVALID') err.keyInvalid = true;
+      throw err;
+    }
+    return j.data;
+  }
   function apiGet(params) {
+    params.k = storeKey();
     var qs = Object.keys(params).map(function (k) { return k + '=' + encodeURIComponent(params[k]); }).join('&');
-    return fetch(SCRIPT_URL + '?' + qs).then(function (r) { return r.json(); })
-      .then(function (j) { if (!j.ok) throw new Error(j.error || 'API錯誤'); return j.data; });
+    return fetch(SCRIPT_URL + '?' + qs).then(function (r) { return r.json(); }).then(handleJson);
   }
   function apiPost(body) {
+    body.k = storeKey();
     return fetch(SCRIPT_URL, { method: 'POST', body: JSON.stringify(body) })
-      .then(function (r) { return r.json(); })
-      .then(function (j) { if (!j.ok) throw new Error(j.error || 'API錯誤'); return j.data; });
+      .then(function (r) { return r.json(); }).then(handleJson);
   }
 </script>
 <style>
@@ -236,12 +266,40 @@
 </head>
 <body>
 <header>
-  <h1>效期登打 <span id="pendingBadge"></span></h1>
+  <h1>效期登打 <span id="storeName" style="font-size:13px;font-weight:400;opacity:.85"></span> <span id="pendingBadge"></span></h1>
   <span class="date" id="todayDate"></span>
 </header>
 
 <main>
   <div id="loading">載入商品主檔中…</div>
+
+  <div id="login" style="display:none; background:#fff; border:1px solid var(--line); border-radius:12px; padding:18px; margin-top:10px;">
+    <div style="font-size:17px; font-weight:700; color:var(--green-dark); margin-bottom:6px;">請輸入本店通行碼</div>
+    <div style="font-size:13px; color:#6b7a72; margin-bottom:12px;">只需輸入一次,這支手機會記住。不知道通行碼請洽店長。</div>
+    <input id="keyInput" type="text" autocomplete="off" autocapitalize="off" placeholder="通行碼" style="margin-bottom:8px;">
+    <div id="keyMsg" style="min-height:18px; font-size:13px; color:var(--red); font-weight:600; margin-bottom:8px;"></div>
+    <button id="keyBtn" class="submit" type="button">進 入</button>
+  </div>
+
+  <div id="setup" style="display:none;">
+    <div style="font-size:18px; font-weight:700; color:var(--green-dark); margin:4px 0 6px;">新店開通:產生 QR code</div>
+    <div style="font-size:13.5px; color:#4c5a53; line-height:1.6; margin-bottom:12px;">
+      貼上本店試算表的 Apps Script「網頁應用程式網址」(結尾是 <b>/exec</b>),系統會先連線確認,再產生這間店專屬的登打 QR code。
+    </div>
+    <textarea id="setupUrl" placeholder="https://script.google.com/macros/s/……/exec" style="width:100%; min-height:90px; font-size:15px; padding:10px 12px; border:1.5px solid var(--line); border-radius:10px; font-family:inherit;"></textarea>
+    <button id="setupBtn" class="submit" type="button" style="margin-top:10px;">檢查並產生</button>
+    <div id="setupMsg" style="margin-top:12px; font-size:14px; line-height:1.6;"></div>
+    <div id="setupResult" style="display:none; margin-top:14px; background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px; text-align:center;">
+      <div id="setupStore" style="font-size:20px; font-weight:700; color:var(--green-dark);"></div>
+      <div style="font-size:13px; color:#6b7a72; margin:2px 0 12px;">效期登打 · 手機相機掃描開啟</div>
+      <div id="setupQr" style="display:inline-block; padding:10px; background:#fff;"></div>
+      <div id="setupLink" style="font-size:12px; color:#4c5a53; word-break:break-all; margin:10px 0;"></div>
+      <div style="display:flex; gap:10px;">
+        <button id="setupDl" type="button" style="flex:1; padding:12px; font-size:15px; font-weight:700; color:#fff; background:var(--green); border:none; border-radius:10px;">下載 QR 圖檔</button>
+        <button id="setupCopy" type="button" style="flex:1; padding:12px; font-size:15px; font-weight:700; color:var(--green-dark); background:var(--green-pale); border:1.5px solid var(--green); border-radius:10px;">複製網址</button>
+      </div>
+    </div>
+  </div>
 
   <div id="form" style="display:none">
     <div id="failBox"></div>
@@ -250,20 +308,10 @@
       <input id="user" type="text" placeholder="姓名" autocomplete="off">
     </div>
 
-    <div class="field">
+    <div class="field" id="areaField">
       <label for="area">區域</label>
       <select id="area" style="width:100%; font-size:18px; padding:12px 14px; border:1.5px solid var(--line); border-radius:10px; background:#fff; -webkit-appearance:none; color:var(--ink);">
         <option value="" disabled selected>選擇盤點區域</option>
-        <option value="1店-1F">1店-1F</option>
-        <option value="1店-B1-A區">1店-B1-A區</option>
-        <option value="1店-B1-B區">1店-B1-B區</option>
-        <option value="1店-調劑室含冰箱">1店-調劑室含冰箱</option>
-        <option value="1店-波浪架">1店-波浪架</option>
-        <option value="2店-1F">2店-1F</option>
-        <option value="2店-B1">2店-B1</option>
-        <option value="2店-2F">2店-2F</option>
-        <option value="2店-樓梯間">2店-樓梯間</option>
-        <option value="2店-波浪架">2店-波浪架</option>
       </select>
     </div>
 
@@ -342,25 +390,166 @@
   var d = new Date();
   $('todayDate').textContent = d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate();
   $('user').value = localStorage.getItem('entryUser') || '';
-  var savedArea = localStorage.getItem('entryArea') || '';
-  if (savedArea) $('area').value = savedArea;
+  var AREA_REQUIRED = true;
+  var AREA_KEY = 'entryArea_' + SID;
+
   $('area').addEventListener('change', function () {
-    localStorage.setItem('entryArea', this.value);
+    lsSet(AREA_KEY, this.value);
     updateBtn();
   });
 
-  apiGet({ action: 'products' })
-    .then(function (data) {
-      PRODUCTS = data.p || {};
-      BARCODES = data.b || {};
-      $('loading').style.display = 'none';
-      $('form').style.display = 'block';
-      addRow(); // 預設一列效期
-      loadToday();
-    })
-    .catch(function (e) {
-      $('loading').textContent = '載入失敗:' + e.message + '(請確認網路與部署設定)';
+  function setupAreas(areas) {
+    var sel = $('area');
+    while (sel.options.length > 1) sel.remove(1);
+    (areas || []).forEach(function (a) {
+      var o = document.createElement('option');
+      o.value = a; o.textContent = a;
+      sel.appendChild(o);
     });
+    AREA_REQUIRED = (areas || []).length > 0;
+    $('areaField').style.display = AREA_REQUIRED ? '' : 'none';
+    var saved = lsGet(AREA_KEY) || (SID === DEFAULT_SID ? lsGet('entryArea') : '');
+    if (saved && (areas || []).indexOf(saved) !== -1) sel.value = saved;
+    else sel.value = '';
+  }
+
+  var booted = false;
+  function boot() {
+    $('login').style.display = 'none';
+    $('loading').style.display = 'block';
+    $('loading').textContent = '載入商品主檔中…';
+    apiGet({ action: 'init' })
+      .then(function (data) {
+        PRODUCTS = data.p || {};
+        BARCODES = data.b || {};
+        setupAreas(data.areas);
+        if (data.storeName) {
+          $('storeName').textContent = data.storeName;
+          document.title = '效期登打 - ' + data.storeName;
+        }
+        $('loading').style.display = 'none';
+        $('form').style.display = 'block';
+        if (!booted) { booted = true; addRow(); }
+        updateBtn();
+        loadToday();
+      })
+      .catch(function (e) {
+        if (e.keyInvalid) {
+          $('loading').style.display = 'none';
+          $('login').style.display = 'block';
+          $('keyMsg').textContent = storeKey() ? '通行碼錯誤,請重新輸入' : '';
+          $('keyInput').focus();
+          return;
+        }
+        $('loading').textContent = '載入失敗:' + e.message + '(請確認網路,或請店長確認系統部署)';
+      });
+  }
+
+  $('keyBtn').addEventListener('click', function () {
+    var k = $('keyInput').value.trim();
+    if (!k) { $('keyMsg').textContent = '請輸入通行碼'; return; }
+    lsSet('key_' + SID, k);
+    boot();
+  });
+  $('keyInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('keyBtn').click(); });
+
+  if (SETUP_MODE) {
+    initSetup();
+  } else {
+    boot();
+  }
+
+  // ── 新店開通頁 ──
+  function initSetup() {
+    $('loading').style.display = 'none';
+    $('setup').style.display = 'block';
+    document.title = '效期登打 - 新店開通';
+    var pre = sidFromAny(QS.get('s'));
+    if (pre) $('setupUrl').value = 'https://script.google.com/macros/s/' + pre + '/exec';
+
+    var qrReady = new Promise(function (resolve, reject) {
+      var lib = document.createElement('script');
+      lib.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+      lib.onload = function () { resolve(); };
+      lib.onerror = function () { reject(new Error('QR_LIB')); };
+      document.head.appendChild(lib);
+    });
+
+    var finalLink = '';
+    $('setupBtn').addEventListener('click', function () {
+      var btn = this;
+      var sid = sidFromAny($('setupUrl').value);
+      var msg = $('setupMsg');
+      $('setupResult').style.display = 'none';
+      if (!sid) {
+        msg.style.color = 'var(--red)';
+        msg.textContent = '網址格式不對:請貼上 Apps Script「部署」後拿到、結尾是 /exec 的網址。';
+        return;
+      }
+      btn.disabled = true; btn.textContent = '連線檢查中…';
+      msg.style.color = '#4c5a53'; msg.textContent = '';
+      var pingDone = false;
+      fetch('https://script.google.com/macros/s/' + sid + '/exec?action=ping')
+        .then(function (r) { return r.json(); })
+        .then(function (j) { pingDone = true; return qrReady.then(function () { return j; }); })
+        .then(function (j) {
+          if (!j.ok) throw new Error(j.error || '連線失敗');
+          var d = j.data || {};
+          finalLink = FRONTEND_URL + '?s=' + sid;
+          $('setupStore').textContent = d.storeName || '(尚未設定店名)';
+          $('setupLink').textContent = finalLink;
+          var notes = ['✓ 連線成功'];
+          if (!d.storeName) notes.push('⚠ 尚未設定店名:試算表選單「效期系統 → 系統設定」填 B1');
+          notes.push(d.needKey ? '✓ 已設定通行碼,同事第一次開啟需輸入' : '⚠ 未設定通行碼:任何拿到 QR code 的人都能登打,建議在系統設定 B2 填寫');
+          msg.innerHTML = '';
+          notes.forEach(function (t) {
+            var div = document.createElement('div');
+            div.textContent = t;
+            div.style.color = t.charAt(0) === '⚠' ? '#b25b00' : 'var(--green-dark)';
+            div.style.fontWeight = '600';
+            msg.appendChild(div);
+          });
+          $('setupQr').innerHTML = '';
+          new QRCode($('setupQr'), { text: finalLink, width: 240, height: 240, correctLevel: QRCode.CorrectLevel.M });
+          $('setupResult').style.display = 'block';
+        })
+        .catch(function (e) {
+          msg.style.color = 'var(--red)';
+          if (pingDone) {
+            msg.textContent = '連線成功,但 QR 產生元件載入失敗,請確認網路後重新整理頁面再試。';
+          } else {
+            msg.textContent = '連線失敗:' + e.message + '。請確認(1)已完成「部署 → 網頁應用程式」(2)存取權為「任何人」(3)貼的是 /exec 結尾的網址';
+          }
+        })
+        .then(function () { btn.disabled = false; btn.textContent = '檢查並產生'; });
+    });
+
+    $('setupDl').addEventListener('click', function () {
+      var canvas = $('setupQr').querySelector('canvas');
+      if (!canvas) return;
+      var name = ($('setupStore').textContent || '本店').replace(/[\\/:*?"<>|()]/g, '');
+      var out = document.createElement('canvas');
+      out.width = 600; out.height = 720;
+      var ctx = out.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 600, 720);
+      ctx.drawImage(canvas, 60, 60, 480, 480);
+      ctx.fillStyle = '#005c2e'; ctx.textAlign = 'center';
+      ctx.font = 'bold 40px sans-serif'; ctx.fillText(name, 300, 610);
+      ctx.fillStyle = '#4c5a53'; ctx.font = '26px sans-serif';
+      ctx.fillText('效期登打 · 手機相機掃描開啟', 300, 660);
+      var a = document.createElement('a');
+      a.href = out.toDataURL('image/png');
+      a.download = '效期登打_' + name + '_QRcode.png';
+      document.body.appendChild(a); a.click(); a.remove();
+    });
+
+    $('setupCopy').addEventListener('click', function () {
+      var btn = this;
+      var done = function () { btn.textContent = '已複製 ✓'; setTimeout(function () { btn.textContent = '複製網址'; }, 1500); };
+      if (navigator.clipboard) navigator.clipboard.writeText(finalLink).then(done, function () { prompt('複製以下網址:', finalLink); });
+      else prompt('複製以下網址:', finalLink);
+    });
+  }
 
   // ── 品名搜尋 ──
   var MAX_SUGGEST = 20;
@@ -932,7 +1121,7 @@
   }
 
   function updateBtn() {
-    $('submitBtn').disabled = !(matched && collectItems() && $('user').value.trim() && $('area').value);
+    $('submitBtn').disabled = !(matched && collectItems() && $('user').value.trim() && (!AREA_REQUIRED || $('area').value));
   }
   $('user').addEventListener('input', updateBtn);
 
