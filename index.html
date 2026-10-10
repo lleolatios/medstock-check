@@ -126,6 +126,13 @@
     border: none; border-radius: 10px; color: #fff;
   }
   #scanPhotoBtn { background: #3a5a48; }
+  .scan-tools { display: flex; gap: 10px; margin-bottom: 12px; }
+  .scan-tools button {
+    display: none; padding: 9px 18px; font-size: 15px; font-weight: 700;
+    border: 1.5px solid rgba(255,255,255,.7); border-radius: 20px;
+    background: transparent; color: #fff;
+  }
+  .scan-tools button.on { background: #fff; color: #1c2b24; }
   #scanClose { background: var(--red); }
   #suggest {
     display: none; position: absolute; left: 0; right: 0; top: 100%; z-index: 20;
@@ -367,7 +374,11 @@
 
 <div id="scanOverlay">
   <div id="liveReader"></div>
-  <div id="scanTip">將條碼對準框內,對到會自動嗶</div>
+  <div id="scanTip">條碼橫放對準框內,距離約 15–20 公分<br>太近反而會糊,對到會自動嗶</div>
+  <div class="scan-tools">
+    <button id="zoomBtn" type="button">放大 2x</button>
+    <button id="torchBtn" type="button">手電筒</button>
+  </div>
   <div class="scan-actions">
     <button id="scanPhotoBtn" type="button">改用拍照</button>
     <button id="scanClose" type="button">關 閉</button>
@@ -611,32 +622,99 @@
   // ── 相機掃描條碼:即時串流優先,拍照備援 ──
   var liveScanner = null;
 
+  var scanCaps = null, zoomOn = false, torchOn = false;
+
   function stopLive() {
     $('scanOverlay').className = '';
+    $('zoomBtn').style.display = 'none';
+    $('torchBtn').style.display = 'none';
     if (liveScanner) {
       var s = liveScanner; liveScanner = null;
       s.stop().then(function () { s.clear(); }).catch(function () {});
     }
   }
 
+  function scanFormats() {
+    var F = Html5QrcodeSupportedFormats;
+    return [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.QR_CODE];
+  }
+
+  // 掃描框:依畫面寬度做成橫長方形,一維條碼較容易整條入框
+  function scanBox(w, h) {
+    var bw = Math.floor(Math.min(w, h * 1.6) * 0.88);
+    return { width: bw, height: Math.max(80, Math.floor(bw * 0.42)) };
+  }
+
+  function onScan(text) {
+    stopLive();
+    scanSuccess(text);
+  }
+
+  // 開相機後:支援的手機開啟連續對焦,並顯示放大、手電筒按鈕
+  function afterStart() {
+    zoomOn = false; torchOn = false;
+    $('zoomBtn').className = ''; $('torchBtn').className = '';
+    $('zoomBtn').textContent = '放大 2x';
+    try { scanCaps = liveScanner.getRunningTrackCapabilities() || {}; } catch (e) { scanCaps = {}; }
+    if (scanCaps.focusMode && scanCaps.focusMode.indexOf('continuous') !== -1) {
+      liveScanner.applyVideoConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(function () {});
+    }
+    if (scanCaps.zoom && scanCaps.zoom.max >= 1.5) $('zoomBtn').style.display = 'inline-block';
+    if (scanCaps.torch) $('torchBtn').style.display = 'inline-block';
+  }
+
   function startLive() {
     $('scanOverlay').className = 'show';
-    liveScanner = new Html5Qrcode('liveReader');
-    liveScanner.start(
-      { facingMode: 'environment' },
-      { fps: 10, qrbox: { width: 260, height: 150 } },
-      function (text) {
+    var cfg = { formatsToSupport: scanFormats(), verbose: false,
+                experimentalFeatures: { useBarCodeDetectorIfSupported: true } };
+    liveScanner = new Html5Qrcode('liveReader', cfg);
+
+    // 第一次嘗試:高畫質 + 連續對焦
+    var hd = { fps: 15, qrbox: scanBox,
+               videoConstraints: { facingMode: 'environment',
+                                   width: { ideal: 1920 }, height: { ideal: 1080 },
+                                   advanced: [{ focusMode: 'continuous' }] } };
+    // 備援:基本設定 (少數舊手機不接受高畫質要求)
+    var basic = { fps: 10, qrbox: scanBox };
+
+    liveScanner.start({ facingMode: 'environment' }, hd, onScan, function () {})
+      .then(afterStart)
+      .catch(function () {
+        if (!liveScanner) return;
+        var s0 = liveScanner;
+        try { s0.clear(); } catch (e) {}
+        liveScanner = new Html5Qrcode('liveReader', cfg);
+        return liveScanner.start({ facingMode: 'environment' }, basic, onScan, function () {})
+          .then(afterStart);
+      })
+      .catch(function () {
+        // 無法開即時相機 (權限被拒或瀏覽器不支援) → 退拍照
         stopLive();
-        scanSuccess(text);
-      },
-      function () {}
-    ).catch(function () {
-      // 無法開即時相機 (權限被拒或瀏覽器不支援) → 退拍照
-      stopLive();
-      $('scanFile').value = '';
-      $('scanFile').click();
-    });
+        $('scanFile').value = '';
+        $('scanFile').click();
+      });
   }
+
+  $('zoomBtn').addEventListener('click', function () {
+    if (!liveScanner || !scanCaps || !scanCaps.zoom) return;
+    var btn = this;
+    var target = zoomOn ? Math.max(1, scanCaps.zoom.min || 1) : Math.min(2, scanCaps.zoom.max);
+    liveScanner.applyVideoConstraints({ advanced: [{ zoom: target }] })
+      .then(function () {
+        zoomOn = !zoomOn;
+        btn.className = zoomOn ? 'on' : '';
+        btn.textContent = zoomOn ? '已放大 2x' : '放大 2x';
+      })
+      .catch(function () { toast('這支手機不支援放大'); btn.style.display = 'none'; });
+  });
+
+  $('torchBtn').addEventListener('click', function () {
+    if (!liveScanner) return;
+    var btn = this;
+    liveScanner.applyVideoConstraints({ advanced: [{ torch: !torchOn }] })
+      .then(function () { torchOn = !torchOn; btn.className = torchOn ? 'on' : ''; })
+      .catch(function () { toast('這支手機不支援手電筒'); btn.style.display = 'none'; });
+  });
 
   $('scanBtn').addEventListener('click', function () {
     if (typeof Html5Qrcode === 'undefined') { toast('掃描元件載入失敗'); return; }
