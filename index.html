@@ -641,8 +641,9 @@
 
   // 掃描框:依畫面寬度做成橫長方形,一維條碼較容易整條入框
   function scanBox(w, h) {
-    var bw = Math.floor(Math.min(w, h * 1.6) * 0.88);
-    return { width: bw, height: Math.max(80, Math.floor(bw * 0.42)) };
+    var bw = Math.floor(w * 0.88);
+    var bh = Math.floor(Math.min(h * 0.8, Math.max(130, bw * 0.55)));
+    return { width: Math.max(150, bw), height: Math.max(60, bh) };
   }
 
   function onScan(text) {
@@ -672,10 +673,11 @@
     // 第一次嘗試:高畫質 + 連續對焦
     var hd = { fps: 15, qrbox: scanBox,
                videoConstraints: { facingMode: 'environment',
-                                   width: { ideal: 1920 }, height: { ideal: 1080 },
+                                   width: { ideal: 1920 }, height: { ideal: 1440 },
+                                   aspectRatio: { ideal: 4 / 3 },
                                    advanced: [{ focusMode: 'continuous' }] } };
     // 備援:基本設定 (少數舊手機不接受高畫質要求)
-    var basic = { fps: 10, qrbox: scanBox };
+    var basic = { fps: 10, qrbox: scanBox, aspectRatio: 4 / 3 };
 
     liveScanner.start({ facingMode: 'environment' }, hd, onScan, function () {})
       .then(afterStart)
