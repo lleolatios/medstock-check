@@ -1,0 +1,1588 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>效期登打</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script>
+  // ── 多店設定:網址 ?s=部署ID 決定這支手機連到哪一間店的試算表 ──
+  var DEFAULT_SID = 'AKfycbyM0p9ArkeIemG8L5e5eN-OPH_xI4dJ3B3Vd_gnqFzLs0QlTARWpXH-kbZKnZgIyKLyAg';
+  var FRONTEND_URL = location.origin + location.pathname;
+  var QS = new URLSearchParams(location.search);
+  var SETUP_MODE = QS.has('setup');
+  // 離線功能總開關:若離線版出問題,把 true 改成 false 再上傳,所有手機就回到純線上模式
+  var OFFLINE_ENABLED = true;
+  // 測試頁 (檔名 test.html):不會改動這支手機記住的「預設門市」
+  var IS_TEST = /test[^\/]*\.html$/.test(location.pathname);
+
+  function sidFromAny(v) {
+    v = String(v || '').trim();
+    var m = v.match(/\/s\/([A-Za-z0-9_-]+)\/(exec|dev)/);
+    if (m) return m[1];
+    if (/^[A-Za-z0-9_-]{20,}$/.test(v)) return v;
+    return '';
+  }
+  function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+  var SID = sidFromAny(QS.get('s'));
+  if (SID && !SETUP_MODE && !IS_TEST) lsSet('storeSid', SID);
+  if (!SID) SID = lsGet('storeSid') || DEFAULT_SID;
+  var SCRIPT_URL = 'https://script.google.com/macros/s/' + SID + '/exec';
+
+  function storeKey() { return lsGet('key_' + SID); }
+
+  function handleJson(j) {
+    if (!j.ok) {
+      var err = new Error(j.error === 'KEY_INVALID' ? '通行碼錯誤' : (j.error || 'API錯誤'));
+      if (j.error === 'KEY_INVALID') err.keyInvalid = true;
+      err.api = true;   // 後台有回應但拒絕 (不是網路問題)
+      throw err;
+    }
+    return j.data;
+  }
+  function apiGet(params) {
+    params.k = storeKey();
+    var qs = Object.keys(params).map(function (k) { return k + '=' + encodeURIComponent(params[k]); }).join('&');
+    return fetch(SCRIPT_URL + '?' + qs).then(function (r) { return r.json(); }).then(handleJson);
+  }
+  function apiPost(body, timeoutMs) {
+    body.k = storeKey();
+    var opt = { method: 'POST', body: JSON.stringify(body) };
+    var timer = null;
+    if (timeoutMs && window.AbortController) {
+      var ac = new AbortController();
+      opt.signal = ac.signal;
+      timer = setTimeout(function () { ac.abort(); }, timeoutMs);
+    }
+    return fetch(SCRIPT_URL, opt)
+      .then(function (r) { if (timer) clearTimeout(timer); return r.json(); },
+            function (e) { if (timer) clearTimeout(timer); throw e; })
+      .then(handleJson);
+  }
+
+  // ── 離線快取:把頁面與掃描元件存進手機 (sw.js) ──
+  if ('serviceWorker' in navigator) {
+    if (OFFLINE_ENABLED) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('sw.js').catch(function () {});
+      });
+    } else {
+      navigator.serviceWorker.getRegistrations()
+        .then(function (rs) { rs.forEach(function (r) { r.unregister(); }); }).catch(function () {});
+      if (window.caches) {
+        caches.keys().then(function (ks) {
+          ks.forEach(function (k) { if (k.indexOf('medstock-') === 0) caches.delete(k); });
+        }).catch(function () {});
+      }
+    }
+  }
+</script>
+<style>
+  :root {
+    --green: #007a3d;
+    --green-dark: #005c2e;
+    --green-pale: #e8f5ee;
+    --red: #c62828;
+    --red-pale: #fdecea;
+    --orange: #b25b00;
+    --orange-pale: #fff3e0;
+    --gray: #5f6b64;
+    --gray-pale: #eef1ef;
+    --ink: #1c2b24;
+    --line: #d8e2dc;
+    --bg: #f4f7f5;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+    background: var(--bg); color: var(--ink);
+    padding-bottom: 40px;
+  }
+  header {
+    background: var(--green-dark); color: #fff;
+    padding: 14px 16px; display: flex; justify-content: space-between; align-items: baseline;
+  }
+  header h1 { font-size: 18px; font-weight: 700; letter-spacing: 2px; }
+  header .date { font-size: 13px; opacity: .85; }
+  #pendingBadge {
+    display: none; font-size: 11px; font-weight: 400; vertical-align: middle;
+    background: rgba(255,255,255,.25); border-radius: 10px; padding: 2px 8px; margin-left: 6px;
+  }
+  .fail-item {
+    background: var(--red-pale); border: 1.5px solid var(--red); color: var(--red);
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;
+    font-size: 14px; font-weight: 600;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  }
+  .fail-item button {
+    border: 1px solid var(--red); color: #fff; background: var(--red);
+    border-radius: 8px; padding: 7px 14px; font-size: 14px; font-weight: 700; flex-shrink: 0;
+  }
+  /* 待上傳橫條 (固定在畫面最上方) */
+  #syncBar { display: none; position: fixed; top: 0; left: 0; right: 0; z-index: 30; color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+  #syncBar.show { display: block; }
+  #syncBar.wait { background: #c26a00; }
+  #syncBar.up   { background: #3a5a48; }
+  #syncBar.ok   { background: var(--green); }
+  #syncBar.fail { background: var(--red); }
+  #syncBar .sb-row {
+    max-width: 480px; margin: 0 auto; padding: 10px 16px;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  #syncText { font-size: 16px; font-weight: 700; line-height: 1.35; }
+  #syncDetail { display: block; font-size: 12.5px; font-weight: 400; text-decoration: underline; margin-top: 2px; opacity: .9; }
+  #syncBtn {
+    flex-shrink: 0; padding: 11px 18px; font-size: 17px; font-weight: 700; letter-spacing: 1px;
+    color: var(--ink); background: #fff; border: none; border-radius: 10px;
+  }
+  #syncBtn:disabled { opacity: .6; }
+  #syncList { display: none; max-width: 480px; margin: 0 auto; padding: 0 16px 10px; max-height: 200px; overflow-y: auto; }
+  #syncList.open { display: block; }
+  #syncList .sl-item {
+    background: rgba(255,255,255,.95); color: var(--ink); border-radius: 8px; padding: 7px 10px; margin-top: 6px;
+    font-size: 13.5px; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  }
+  #syncList .sl-err { color: var(--red); font-size: 12px; font-weight: 600; }
+  #syncList button { border: 1px solid var(--red); color: var(--red); background: #fff; border-radius: 6px; padding: 5px 9px; font-size: 12.5px; flex-shrink: 0; }
+  #netNote {
+    display: none; background: var(--gray-pale); color: var(--gray); border-radius: 8px;
+    padding: 8px 12px; margin-bottom: 12px; font-size: 13px;
+  }
+  main { max-width: 480px; margin: 0 auto; padding: 16px; }
+
+  .field { margin-bottom: 14px; }
+  label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; color: var(--green-dark); }
+  input {
+    width: 100%; font-size: 20px; padding: 12px 14px;
+    border: 1.5px solid var(--line); border-radius: 10px; background: #fff;
+    -webkit-appearance: none;
+  }
+  input:focus { outline: 2px solid var(--green); border-color: var(--green); }
+
+  /* 品名搜尋下拉 */
+  .search-wrap { position: relative; }
+
+  /* 條碼掃描 */
+  .code-row { display: flex; gap: 8px; }
+  .code-row input { flex: 1; }
+  button.scan-btn {
+    flex-shrink: 0; width: 54px; border-radius: 10px;
+    border: 1.5px solid var(--green); background: var(--green-pale);
+    font-size: 24px; line-height: 1;
+  }
+  button.scan-btn:active { background: #d4ecdf; }
+  #scanOverlay {
+    display: none; position: fixed; inset: 0; z-index: 50;
+    background: rgba(0,0,0,.9); flex-direction: column;
+    align-items: center; justify-content: center; padding: 8px;
+  }
+  #scanOverlay.show { display: flex; }
+  #liveReader { width: 100%; max-width: 480px; border-radius: 12px; overflow: hidden; background: #000; }
+  #scanTip { color: #fff; font-size: 15px; margin: 12px 0; text-align: center; }
+  .scan-actions { display: flex; gap: 10px; }
+  .scan-actions button {
+    padding: 12px 26px; font-size: 16px; font-weight: 700; letter-spacing: 2px;
+    border: none; border-radius: 10px; color: #fff;
+  }
+  #scanPhotoBtn { background: #3a5a48; }
+  .scan-tools { display: flex; gap: 10px; margin-bottom: 12px; }
+  .scan-tools button {
+    display: none; padding: 9px 18px; font-size: 15px; font-weight: 700;
+    border: 1.5px solid rgba(255,255,255,.7); border-radius: 20px;
+    background: transparent; color: #fff;
+  }
+  .scan-tools button.on { background: #fff; color: #1c2b24; }
+  #scanClose { background: var(--red); }
+  #suggest {
+    display: none; position: absolute; left: 0; right: 0; top: 100%; z-index: 20;
+    background: #fff; border: 1.5px solid var(--green); border-radius: 10px;
+    margin-top: 4px; max-height: 260px; overflow-y: auto;
+    box-shadow: 0 6px 18px rgba(0,0,0,.12);
+  }
+  #suggest .sg-item {
+    padding: 10px 12px; border-bottom: 1px solid #eef2ef; cursor: pointer;
+  }
+  #suggest .sg-item:last-child { border-bottom: none; }
+  #suggest .sg-item:active { background: var(--green-pale); }
+  #suggest .sg-name { font-size: 15px; font-weight: 600; }
+  #suggest .sg-code { font-size: 12.5px; color: #6b7a72; margin-top: 2px; }
+  #suggest .sg-more { padding: 8px 12px; font-size: 12.5px; color: #8a9a91; text-align: center; }
+
+  /* 品名確認卡 */
+  #nameCard {
+    min-height: 58px; border-radius: 10px; padding: 10px 14px; margin-bottom: 10px;
+    display: flex; flex-direction: column; justify-content: center;
+    font-size: 17px; font-weight: 600;
+    border: 1.5px dashed var(--line); color: #8a9a91; background: #fff;
+    transition: background .15s, border-color .15s;
+  }
+  #nameCard.ok   { background: var(--green-pale); border: 1.5px solid var(--green); color: var(--green-dark); }
+  #nameCard.bad  { background: var(--red-pale);   border: 1.5px solid var(--red);   color: var(--red); }
+  #nameCard .rcode { font-size: 13px; font-weight: 400; margin-top: 3px; opacity: .8; }
+
+  /* 後台既有紀錄面板 */
+  #history {
+    display: none; background: #fff; border: 1px solid var(--line);
+    border-radius: 10px; margin-bottom: 14px; overflow: hidden;
+  }
+  #history .h-title {
+    font-size: 13px; font-weight: 700; color: var(--green-dark);
+    background: var(--gray-pale); padding: 8px 12px;
+  }
+  #history .h-body { max-height: 170px; overflow-y: auto; }
+  #history .h-item {
+    padding: 7px 12px; font-size: 13.5px; border-top: 1px solid #eef2ef;
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  #history .h-item .exp { font-weight: 600; }
+  #history .h-item .who { color: #6b7a72; font-size: 12.5px; white-space: nowrap; }
+  #history .h-empty { padding: 10px 12px; font-size: 13px; color: #8a9a91; }
+  #history .st-in { color: var(--green-dark); }
+  #history .st-over { color: var(--red); }
+  #history .st-no { color: var(--gray); }
+
+  /* 效期列 */
+  .exp-row {
+    background: #fff; border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px; margin-bottom: 10px; position: relative;
+  }
+  .exp-row .inputs { display: flex; gap: 10px; }
+  .exp-row .f-exp { flex: 1.4; }
+  .exp-row .f-qty { flex: 1; }
+  .exp-row label { font-size: 13px; margin-bottom: 4px; }
+  .exp-row input { font-size: 19px; padding: 10px 12px; }
+  .exp-row .hint { font-size: 12px; color: #6b7a72; margin-top: 4px; min-height: 15px; }
+  .exp-row .hint.err { color: var(--red); font-weight: 600; }
+
+  .exp-row .dup {
+    display: none; margin-top: 8px; border-radius: 8px;
+    padding: 7px 10px; font-size: 13px; font-weight: 600;
+    background: var(--orange-pale); color: var(--orange); border: 1px solid var(--orange);
+  }
+  .exp-row .dup.show { display: block; }
+
+  .exp-row .status {
+    display: none; margin-top: 8px; border-radius: 8px;
+    padding: 7px 10px; font-size: 14px; font-weight: 700; text-align: center;
+  }
+  .exp-row .status .sub { font-size: 12px; font-weight: 400; }
+  .exp-row .status.in   { display: block; background: var(--green-pale);  color: var(--green-dark); }
+  .exp-row .status.over { display: block; background: var(--red-pale);    color: var(--red); }
+  .exp-row .status.m0   { display: block; background: var(--red-pale);    color: #cc0000; border: 1px solid #cc0000; }
+  .exp-row .status.m1   { display: block; background: var(--orange-pale); color: #cc7700; border: 1px solid #cc7700; }
+  .exp-row .status.m2   { display: block; background: #fffde7;            color: #9e7c00; border: 1px solid #c9a800; }
+  .exp-row .status.no   { display: block; background: var(--gray-pale);   color: var(--gray); }
+  .exp-row .status.free { display: block; background: var(--gray-pale);   color: var(--gray); }
+
+  .exp-row button.rm {
+    position: absolute; top: 8px; right: 8px;
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 1px solid var(--red); color: var(--red); background: #fff;
+    font-size: 15px; line-height: 1; display: none;
+  }
+  .exp-row.removable button.rm { display: block; }
+
+  button.add-exp {
+    width: 100%; padding: 11px; font-size: 15px; font-weight: 600;
+    color: var(--green-dark); background: var(--green-pale);
+    border: 1.5px dashed var(--green); border-radius: 10px; margin-bottom: 14px;
+  }
+  button.add-exp:active { background: #d4ecdf; }
+
+  button.submit {
+    width: 100%; padding: 15px; font-size: 19px; font-weight: 700;
+    color: #fff; background: var(--green); border: none; border-radius: 12px;
+    letter-spacing: 4px; margin-top: 4px;
+  }
+  button.submit:disabled { background: #a9c4b5; }
+  button.submit:active { background: var(--green-dark); }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: var(--ink); color: #fff; padding: 10px 20px; border-radius: 24px;
+    font-size: 15px; opacity: 0; pointer-events: none; transition: opacity .25s;
+    white-space: nowrap; z-index: 9;
+  }
+  #toast.show { opacity: 1; }
+
+  section.today { margin-top: 26px; }
+  section.today h2 {
+    font-size: 14px; color: var(--green-dark); letter-spacing: 1px;
+    display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
+  }
+  section.today h2 a { font-size: 13px; color: var(--green); text-decoration: none; font-weight: 400; }
+  .entry {
+    background: #fff; border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 8px; font-size: 14.5px;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  }
+  .entry .info { flex: 1; min-width: 0; }
+  .entry .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .entry .meta { color: #6b7a72; font-size: 12.5px; margin-top: 2px; }
+  .entry .meta .st-in { color: var(--green-dark); font-weight: 600; }
+  .entry .meta .st-over { color: var(--red); font-weight: 600; }
+  .entry .meta .st-no { color: var(--gray); font-weight: 600; }
+  .entry button.del {
+    border: 1px solid var(--red); color: var(--red); background: #fff;
+    border-radius: 8px; padding: 6px 10px; font-size: 13px; flex-shrink: 0;
+  }
+  .empty { color: #8a9a91; font-size: 13.5px; text-align: center; padding: 14px 0; }
+  #loading { text-align: center; color: #6b7a72; padding: 30px 0; font-size: 15px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>效期登打 <span id="storeName" style="font-size:13px;font-weight:400;opacity:.85"></span></h1>
+  <span class="date" id="todayDate"></span>
+</header>
+
+<div id="syncBar">
+  <div class="sb-row">
+    <div><span id="syncText"></span><a href="#" id="syncDetail" style="color:#fff"></a></div>
+    <button id="syncBtn" type="button">立即上傳</button>
+  </div>
+  <div id="syncList"></div>
+</div>
+
+<main>
+  <div id="loading">載入商品主檔中…</div>
+
+  <div id="login" style="display:none; background:#fff; border:1px solid var(--line); border-radius:12px; padding:18px; margin-top:10px;">
+    <div style="font-size:17px; font-weight:700; color:var(--green-dark); margin-bottom:6px;">請輸入本店通行碼</div>
+    <div style="font-size:13px; color:#6b7a72; margin-bottom:12px;">只需輸入一次,這支手機會記住。不知道通行碼請洽店長。</div>
+    <input id="keyInput" type="text" autocomplete="off" autocapitalize="off" placeholder="通行碼" style="margin-bottom:8px;">
+    <div id="keyMsg" style="min-height:18px; font-size:13px; color:var(--red); font-weight:600; margin-bottom:8px;"></div>
+    <button id="keyBtn" class="submit" type="button">進 入</button>
+  </div>
+
+  <div id="setup" style="display:none;">
+    <div style="font-size:18px; font-weight:700; color:var(--green-dark); margin:4px 0 6px;">新店開通:產生 QR code</div>
+    <div style="font-size:13.5px; color:#4c5a53; line-height:1.6; margin-bottom:12px;">
+      貼上本店試算表的 Apps Script「網頁應用程式網址」(結尾是 <b>/exec</b>),系統會先連線確認,再產生這間店專屬的登打 QR code。
+    </div>
+    <textarea id="setupUrl" placeholder="https://script.google.com/macros/s/……/exec" style="width:100%; min-height:90px; font-size:15px; padding:10px 12px; border:1.5px solid var(--line); border-radius:10px; font-family:inherit;"></textarea>
+    <button id="setupBtn" class="submit" type="button" style="margin-top:10px;">檢查並產生</button>
+    <div id="setupMsg" style="margin-top:12px; font-size:14px; line-height:1.6;"></div>
+    <div id="setupResult" style="display:none; margin-top:14px; background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px; text-align:center;">
+      <div id="setupStore" style="font-size:20px; font-weight:700; color:var(--green-dark);"></div>
+      <div style="font-size:13px; color:#6b7a72; margin:2px 0 12px;">效期登打 · 手機相機掃描開啟</div>
+      <div id="setupQr" style="display:inline-block; padding:10px; background:#fff;"></div>
+      <div id="setupLink" style="font-size:12px; color:#4c5a53; word-break:break-all; margin:10px 0;"></div>
+      <div style="display:flex; gap:10px;">
+        <button id="setupDl" type="button" style="flex:1; padding:12px; font-size:15px; font-weight:700; color:#fff; background:var(--green); border:none; border-radius:10px;">下載 QR 圖檔</button>
+        <button id="setupCopy" type="button" style="flex:1; padding:12px; font-size:15px; font-weight:700; color:var(--green-dark); background:var(--green-pale); border:1.5px solid var(--green); border-radius:10px;">複製網址</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="form" style="display:none">
+    <div id="failBox"></div>
+    <div id="netNote"></div>
+    <div class="field">
+      <label for="user">登打人</label>
+      <input id="user" type="text" placeholder="姓名" autocomplete="off">
+    </div>
+
+    <div class="field" id="areaField">
+      <label for="area">區域</label>
+      <select id="area" style="width:100%; font-size:18px; padding:12px 14px; border:1.5px solid var(--line); border-radius:10px; background:#fff; -webkit-appearance:none; color:var(--ink);">
+        <option value="" disabled selected>選擇盤點區域</option>
+      </select>
+    </div>
+
+    <div class="field search-wrap">
+      <label for="nameSearch">品名搜尋(選填)</label>
+      <input id="nameSearch" type="text" placeholder="輸入關鍵字,例:優蛋白" autocomplete="off">
+      <div id="suggest"></div>
+    </div>
+
+    <div class="field">
+      <label for="code">貨號</label>
+      <div class="code-row">
+        <input id="code" type="text" inputmode="numeric" placeholder="輸入貨號或掃條碼" autocomplete="off">
+        <button type="button" class="scan-btn" id="scanBtn" title="掃描條碼">📷</button>
+      </div>
+    </div>
+
+    <div id="nameCard">輸入貨號或掃條碼</div>
+
+    <div id="history">
+      <div class="h-title" id="hTitle">後台既有紀錄</div>
+      <div class="h-body" id="hBody"></div>
+    </div>
+
+    <div id="expRows"></div>
+
+    <button class="add-exp" id="addExp">＋ 新增效期</button>
+
+    <button class="submit" id="submitBtn" disabled>送 出</button>
+
+    <section class="today">
+      <h2>今日登打紀錄 <a href="#" id="refresh">重新整理</a></h2>
+      <div id="entries"><div class="empty">尚無紀錄</div></div>
+    </section>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<div id="bindOverlay" style="display:none; position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.6); align-items:center; justify-content:center; padding:20px;">
+  <div style="background:#fff; border-radius:14px; padding:18px; width:100%; max-width:420px;">
+    <div style="font-size:16px; font-weight:700; color:var(--green-dark); margin-bottom:4px;">綁定新條碼</div>
+    <div style="font-size:13px; color:#6b7a72; margin-bottom:12px;">條碼:<span id="bindBarcodeText" style="font-weight:700;"></span></div>
+    <label style="font-size:14px; font-weight:600; color:var(--green-dark); display:block; margin-bottom:6px;">輸入此商品的貨號(看貨架標籤)</label>
+    <input id="bindCode" type="text" inputmode="numeric" placeholder="例:080201075" autocomplete="off" style="margin-bottom:8px;">
+    <div id="bindName" style="min-height:44px; border-radius:8px; padding:9px 12px; margin-bottom:12px; font-size:15px; font-weight:600; border:1.5px dashed var(--line); color:#8a9a91;">輸入貨號後確認品名</div>
+    <div style="display:flex; gap:10px;">
+      <button id="bindConfirm" type="button" disabled style="flex:1; padding:12px; font-size:16px; font-weight:700; color:#fff; background:var(--green); border:none; border-radius:10px;">確認綁定</button>
+      <button id="bindCancel" type="button" style="flex:1; padding:12px; font-size:16px; font-weight:700; color:var(--red); background:#fff; border:1.5px solid var(--red); border-radius:10px;">取消</button>
+    </div>
+  </div>
+</div>
+
+<div id="scanOverlay">
+  <div id="liveReader"></div>
+  <div id="scanTip">條碼橫放對準框內,距離約 15–20 公分<br>太近反而會糊,對到會自動嗶</div>
+  <div class="scan-tools">
+    <button id="zoomBtn" type="button">放大 2x</button>
+    <button id="torchBtn" type="button">手電筒</button>
+  </div>
+  <div class="scan-actions">
+    <button id="scanPhotoBtn" type="button">改用拍照</button>
+    <button id="scanClose" type="button">關 閉</button>
+  </div>
+</div>
+
+<input type="file" id="scanFile" accept="image/*" capture="environment" style="display:none">
+<div id="reader" style="position:absolute; left:-9999px; top:0; width:600px; height:600px;"></div>
+
+<script>
+  var PRODUCTS = {};
+  var BARCODES = {};
+  var matched = false;
+  var existingExpiries = {};  // 後台已有的效期 → 筆數
+  var historyToken = 0;       // 避免舊查詢覆蓋新查詢
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ── 初始化 ──
+  var d = new Date();
+  $('todayDate').textContent = d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate();
+  $('user').value = localStorage.getItem('entryUser') || '';
+  var AREA_REQUIRED = true;
+  var AREA_KEY = 'entryArea_' + SID;
+
+  $('area').addEventListener('change', function () {
+    lsSet(AREA_KEY, this.value);
+    updateBtn();
+  });
+
+  function setupAreas(areas) {
+    var sel = $('area');
+    while (sel.options.length > 1) sel.remove(1);
+    (areas || []).forEach(function (a) {
+      var o = document.createElement('option');
+      o.value = a; o.textContent = a;
+      sel.appendChild(o);
+    });
+    AREA_REQUIRED = (areas || []).length > 0;
+    $('areaField').style.display = AREA_REQUIRED ? '' : 'none';
+    var saved = lsGet(AREA_KEY) || (SID === DEFAULT_SID ? lsGet('entryArea') : '');
+    if (saved && (areas || []).indexOf(saved) !== -1) sel.value = saved;
+    else sel.value = '';
+  }
+
+  var booted = false;
+  var INIT_KEY = 'init_' + SID;   // 手機內的商品主檔 (離線時使用)
+
+  function applyInit(data) {
+    PRODUCTS = data.p || {};
+    BARCODES = data.b || {};
+    setupAreas(data.areas);
+    if (data.storeName || IS_TEST) {
+      $('storeName').textContent = (data.storeName || '') + (IS_TEST ? '(測試版)' : '');
+      if (data.storeName) document.title = '效期登打 - ' + data.storeName;
+    }
+  }
+  function showForm() {
+    $('loading').style.display = 'none';
+    $('login').style.display = 'none';
+    $('form').style.display = 'block';
+    if (!booted) { booted = true; addRow(); }
+    updateBtn();
+  }
+  function netNote(text) {
+    var el = $('netNote');
+    el.textContent = text || '';
+    el.style.display = text ? 'block' : 'none';
+  }
+
+  function boot() {
+    $('login').style.display = 'none';
+    var cached = null;
+    try { cached = JSON.parse(lsGet(INIT_KEY) || 'null'); } catch (e) { cached = null; }
+    var hasCache = !!(cached && cached.p);
+    if (hasCache) {
+      // 手機裡已有商品主檔 → 先顯示畫面,背景再向後台更新
+      applyInit(cached);
+      showForm();
+    } else {
+      $('loading').style.display = 'block';
+      $('loading').textContent = '載入商品主檔中…';
+    }
+    apiGet({ action: 'init' })
+      .then(function (data) {
+        applyInit(data);
+        try {
+          localStorage.setItem(INIT_KEY, JSON.stringify(
+            { p: data.p || {}, b: data.b || {}, storeName: data.storeName || '', areas: data.areas || [], t: Date.now() }));
+        } catch (e) { /* 手機儲存空間不足:不影響線上使用 */ }
+        netNote('');
+        showForm();
+        loadToday();
+        flushQueue(false);
+      })
+      .catch(function (e) {
+        if (e.keyInvalid) {
+          $('loading').style.display = 'none';
+          $('form').style.display = 'none';
+          $('login').style.display = 'block';
+          $('keyMsg').textContent = storeKey() ? '通行碼錯誤,請重新輸入' : '';
+          $('keyInput').focus();
+          return;
+        }
+        if (hasCache) {
+          var d = cached.t ? new Date(cached.t) : null;
+          netNote('目前連不上後台,使用手機內的商品主檔' + (d ? '(' + (d.getMonth() + 1) + '/' + d.getDate() + ' 更新)' : '') + '。可照常掃描、登打,資料會先存在手機。');
+          return;
+        }
+        $('loading').textContent = '載入失敗:' + e.message + '(請確認網路,或請店長確認系統部署)';
+      });
+  }
+
+  $('keyBtn').addEventListener('click', function () {
+    var k = $('keyInput').value.trim();
+    if (!k) { $('keyMsg').textContent = '請輸入通行碼'; return; }
+    lsSet('key_' + SID, k);
+    boot();
+  });
+  $('keyInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('keyBtn').click(); });
+
+  if (SETUP_MODE) {
+    initSetup();
+  } else {
+    setTimeout(boot, 0);   // 等整份程式載入完再啟動
+  }
+
+  // ── 新店開通頁 ──
+  function initSetup() {
+    $('loading').style.display = 'none';
+    $('setup').style.display = 'block';
+    document.title = '效期登打 - 新店開通';
+    var pre = sidFromAny(QS.get('s'));
+    if (pre) $('setupUrl').value = 'https://script.google.com/macros/s/' + pre + '/exec';
+
+    var qrReady = new Promise(function (resolve, reject) {
+      var lib = document.createElement('script');
+      lib.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+      lib.onload = function () { resolve(); };
+      lib.onerror = function () { reject(new Error('QR_LIB')); };
+      document.head.appendChild(lib);
+    });
+
+    var finalLink = '';
+    $('setupBtn').addEventListener('click', function () {
+      var btn = this;
+      var sid = sidFromAny($('setupUrl').value);
+      var msg = $('setupMsg');
+      $('setupResult').style.display = 'none';
+      if (!sid) {
+        msg.style.color = 'var(--red)';
+        msg.textContent = '網址格式不對:請貼上 Apps Script「部署」後拿到、結尾是 /exec 的網址。';
+        return;
+      }
+      btn.disabled = true; btn.textContent = '連線檢查中…';
+      msg.style.color = '#4c5a53'; msg.textContent = '';
+      var pingDone = false;
+      fetch('https://script.google.com/macros/s/' + sid + '/exec?action=ping')
+        .then(function (r) { return r.json(); })
+        .then(function (j) { pingDone = true; return qrReady.then(function () { return j; }); })
+        .then(function (j) {
+          if (!j.ok) throw new Error(j.error || '連線失敗');
+          var d = j.data || {};
+          finalLink = FRONTEND_URL + '?s=' + sid;
+          $('setupStore').textContent = d.storeName || '(尚未設定店名)';
+          $('setupLink').textContent = finalLink;
+          var notes = ['✓ 連線成功'];
+          if (!d.storeName) notes.push('⚠ 尚未設定店名:試算表選單「效期系統 → 系統設定」填 B1');
+          notes.push(d.needKey ? '✓ 已設定通行碼,同事第一次開啟需輸入' : '⚠ 未設定通行碼:任何拿到 QR code 的人都能登打,建議在系統設定 B2 填寫');
+          msg.innerHTML = '';
+          notes.forEach(function (t) {
+            var div = document.createElement('div');
+            div.textContent = t;
+            div.style.color = t.charAt(0) === '⚠' ? '#b25b00' : 'var(--green-dark)';
+            div.style.fontWeight = '600';
+            msg.appendChild(div);
+          });
+          $('setupQr').innerHTML = '';
+          new QRCode($('setupQr'), { text: finalLink, width: 240, height: 240, correctLevel: QRCode.CorrectLevel.M });
+          $('setupResult').style.display = 'block';
+        })
+        .catch(function (e) {
+          msg.style.color = 'var(--red)';
+          if (pingDone) {
+            msg.textContent = '連線成功,但 QR 產生元件載入失敗,請確認網路後重新整理頁面再試。';
+          } else {
+            msg.textContent = '連線失敗:' + e.message + '。請確認(1)已完成「部署 → 網頁應用程式」(2)存取權為「任何人」(3)貼的是 /exec 結尾的網址';
+          }
+        })
+        .then(function () { btn.disabled = false; btn.textContent = '檢查並產生'; });
+    });
+
+    $('setupDl').addEventListener('click', function () {
+      var canvas = $('setupQr').querySelector('canvas');
+      if (!canvas) return;
+      var name = ($('setupStore').textContent || '本店').replace(/[\\/:*?"<>|()]/g, '');
+      var out = document.createElement('canvas');
+      out.width = 600; out.height = 720;
+      var ctx = out.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 600, 720);
+      ctx.drawImage(canvas, 60, 60, 480, 480);
+      ctx.fillStyle = '#005c2e'; ctx.textAlign = 'center';
+      ctx.font = 'bold 40px sans-serif'; ctx.fillText(name, 300, 610);
+      ctx.fillStyle = '#4c5a53'; ctx.font = '26px sans-serif';
+      ctx.fillText('效期登打 · 手機相機掃描開啟', 300, 660);
+      var a = document.createElement('a');
+      a.href = out.toDataURL('image/png');
+      a.download = '效期登打_' + name + '_QRcode.png';
+      document.body.appendChild(a); a.click(); a.remove();
+    });
+
+    $('setupCopy').addEventListener('click', function () {
+      var btn = this;
+      var done = function () { btn.textContent = '已複製 ✓'; setTimeout(function () { btn.textContent = '複製網址'; }, 1500); };
+      if (navigator.clipboard) navigator.clipboard.writeText(finalLink).then(done, function () { prompt('複製以下網址:', finalLink); });
+      else prompt('複製以下網址:', finalLink);
+    });
+  }
+
+  // ── 品名搜尋 ──
+  var MAX_SUGGEST = 20;
+  function hideSuggest() { $('suggest').style.display = 'none'; $('suggest').innerHTML = ''; }
+
+  $('nameSearch').addEventListener('input', function () {
+    var q = this.value.trim();
+    var box = $('suggest');
+    box.innerHTML = '';
+    if (!q) { hideSuggest(); return; }
+
+    var hits = [];
+    for (var code in PRODUCTS) {
+      if (PRODUCTS[code].n.indexOf(q) !== -1) {
+        hits.push({ code: code, name: PRODUCTS[code].n });
+        if (hits.length > MAX_SUGGEST) break;
+      }
+    }
+
+    if (!hits.length) {
+      box.innerHTML = '<div class="sg-more">查無符合「' + q + '」的商品</div>';
+      box.style.display = 'block';
+      return;
+    }
+
+    hits.slice(0, MAX_SUGGEST).forEach(function (h) {
+      var item = document.createElement('div');
+      item.className = 'sg-item';
+      var nm = document.createElement('div');
+      nm.className = 'sg-name'; nm.textContent = h.name;
+      var cd = document.createElement('div');
+      cd.className = 'sg-code'; cd.textContent = '貨號 ' + h.code;
+      item.appendChild(nm); item.appendChild(cd);
+      item.addEventListener('click', function () {
+        $('code').value = h.code;
+        $('code').dispatchEvent(new Event('input')); // 觸發品名確認+後台查詢
+        $('nameSearch').value = '';
+        hideSuggest();
+        // 帶入後直接跳到第一列效期欄
+        var firstExp = document.querySelector('.exp-row .i-exp');
+        if (firstExp) firstExp.focus();
+      });
+      box.appendChild(item);
+    });
+    if (hits.length > MAX_SUGGEST) {
+      var more = document.createElement('div');
+      more.className = 'sg-more';
+      more.textContent = '結果過多,請輸入更完整的關鍵字';
+      box.appendChild(more);
+    }
+    box.style.display = 'block';
+  });
+
+  // 點擊其他地方關閉下拉
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.search-wrap')) hideSuggest();
+  });
+
+  // ── 相機掃描條碼:即時串流優先,拍照備援 ──
+  var liveScanner = null;
+
+  var scanCaps = null, zoomOn = false, torchOn = false;
+
+  function stopLive() {
+    $('scanOverlay').className = '';
+    $('zoomBtn').style.display = 'none';
+    $('torchBtn').style.display = 'none';
+    if (liveScanner) {
+      var s = liveScanner; liveScanner = null;
+      s.stop().then(function () { s.clear(); }).catch(function () {});
+    }
+  }
+
+  function scanFormats() {
+    var F = Html5QrcodeSupportedFormats;
+    return [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.QR_CODE];
+  }
+
+  // 掃描框:依畫面寬度做成橫長方形,一維條碼較容易整條入框
+  function scanBox(w, h) {
+    var bw = Math.floor(w * 0.96);
+    var bh = Math.floor(Math.min(h * 0.9, Math.max(160, bw * 0.68)));
+    return { width: Math.max(150, bw), height: Math.max(60, bh) };
+  }
+
+  function onScan(text) {
+    stopLive();
+    scanSuccess(text);
+  }
+
+  // 開相機後:支援的手機開啟連續對焦,並顯示放大、手電筒按鈕
+  function afterStart() {
+    zoomOn = false; torchOn = false;
+    $('zoomBtn').className = ''; $('torchBtn').className = '';
+    $('zoomBtn').textContent = '放大 2x';
+    try { scanCaps = liveScanner.getRunningTrackCapabilities() || {}; } catch (e) { scanCaps = {}; }
+    if (scanCaps.focusMode && scanCaps.focusMode.indexOf('continuous') !== -1) {
+      liveScanner.applyVideoConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(function () {});
+    }
+    if (scanCaps.zoom && scanCaps.zoom.max >= 1.5) $('zoomBtn').style.display = 'inline-block';
+    if (scanCaps.torch) $('torchBtn').style.display = 'inline-block';
+  }
+
+  function startLive() {
+    $('scanOverlay').className = 'show';
+    var cfg = { formatsToSupport: scanFormats(), verbose: false,
+                experimentalFeatures: { useBarCodeDetectorIfSupported: true } };
+    liveScanner = new Html5Qrcode('liveReader', cfg);
+
+    // 第一次嘗試:高畫質 + 連續對焦
+    var hd = { fps: 15, qrbox: scanBox,
+               videoConstraints: { facingMode: 'environment',
+                                   width: { ideal: 1920 }, height: { ideal: 1440 },
+                                   aspectRatio: { ideal: 4 / 3 },
+                                   advanced: [{ focusMode: 'continuous' }] } };
+    // 備援:基本設定 (少數舊手機不接受高畫質要求)
+    var basic = { fps: 10, qrbox: scanBox, aspectRatio: 4 / 3 };
+
+    liveScanner.start({ facingMode: 'environment' }, hd, onScan, function () {})
+      .then(afterStart)
+      .catch(function () {
+        if (!liveScanner) return;
+        var s0 = liveScanner;
+        try { s0.clear(); } catch (e) {}
+        liveScanner = new Html5Qrcode('liveReader', cfg);
+        return liveScanner.start({ facingMode: 'environment' }, basic, onScan, function () {})
+          .then(afterStart);
+      })
+      .catch(function () {
+        // 無法開即時相機 (權限被拒或瀏覽器不支援) → 退拍照
+        stopLive();
+        $('scanFile').value = '';
+        $('scanFile').click();
+      });
+  }
+
+  $('zoomBtn').addEventListener('click', function () {
+    if (!liveScanner || !scanCaps || !scanCaps.zoom) return;
+    var btn = this;
+    var target = zoomOn ? Math.max(1, scanCaps.zoom.min || 1) : Math.min(2, scanCaps.zoom.max);
+    liveScanner.applyVideoConstraints({ advanced: [{ zoom: target }] })
+      .then(function () {
+        zoomOn = !zoomOn;
+        btn.className = zoomOn ? 'on' : '';
+        btn.textContent = zoomOn ? '已放大 2x' : '放大 2x';
+      })
+      .catch(function () { toast('這支手機不支援放大'); btn.style.display = 'none'; });
+  });
+
+  $('torchBtn').addEventListener('click', function () {
+    if (!liveScanner) return;
+    var btn = this;
+    liveScanner.applyVideoConstraints({ advanced: [{ torch: !torchOn }] })
+      .then(function () { torchOn = !torchOn; btn.className = torchOn ? 'on' : ''; })
+      .catch(function () { toast('這支手機不支援手電筒'); btn.style.display = 'none'; });
+  });
+
+  $('scanBtn').addEventListener('click', function () {
+    if (typeof Html5Qrcode === 'undefined') { toast('掃描元件載入失敗'); return; }
+    startLive();
+  });
+  $('scanClose').addEventListener('click', stopLive);
+  $('scanPhotoBtn').addEventListener('click', function () {
+    stopLive();
+    $('scanFile').value = '';
+    $('scanFile').click();
+  });
+
+  function scanSuccess(text) {
+    if (navigator.vibrate) navigator.vibrate(80);
+    toast('✓ 已辨識:' + text);
+    $('code').value = String(text).trim();
+    $('code').dispatchEvent(new Event('input'));
+    var firstExp = document.querySelector('.exp-row .i-exp');
+    if (firstExp && matched) firstExp.focus();
+  }
+
+  var BD = ('BarcodeDetector' in window)
+    ? new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'qr_code'] })
+    : null;
+
+  // 對單一 canvas 嘗試辨識:先原生引擎,再函式庫
+  function decodeCanvas(canvas) {
+    var nativeTry = BD
+      ? BD.detect(canvas).then(function (codes) {
+          if (codes && codes.length) return codes[0].rawValue;
+          throw 'nf';
+        })
+      : Promise.reject('no-native');
+
+    return nativeTry.catch(function () {
+      if (typeof Html5Qrcode === 'undefined') throw 'no-lib';
+      return new Promise(function (resolve, reject) {
+        canvas.toBlob(function (blob) {
+          if (!blob) return reject('blob');
+          var f = new File([blob], 'scan.png', { type: 'image/png' });
+          var h5 = new Html5Qrcode('reader');
+          h5.scanFile(f, false)
+            .then(function (t) { try { h5.clear(); } catch (e) {} resolve(t); })
+            .catch(function (e2) { try { h5.clear(); } catch (e) {} reject(e2); });
+        }, 'image/png');
+      });
+    });
+  }
+
+  // 產生影像變化版本:原圖縮放 / 中央裁切放大 / 旋轉90度
+  function makeCanvas(img, mode) {
+    var c = document.createElement('canvas');
+    var ctx = c.getContext('2d');
+    var maxW = 1500;
+
+    if (mode === 'full') {
+      var sc = Math.min(1, maxW / img.width);
+      c.width = img.width * sc; c.height = img.height * sc;
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+    } else if (mode === 'center') {
+      // 取中央 60% 區域放大
+      var cw = img.width * 0.6, ch = img.height * 0.6;
+      var sx = (img.width - cw) / 2, sy = (img.height - ch) / 2;
+      var sc2 = Math.min(1.5, maxW / cw);
+      c.width = cw * sc2; c.height = ch * sc2;
+      ctx.drawImage(img, sx, sy, cw, ch, 0, 0, c.width, c.height);
+    } else { // rotate90
+      var sc3 = Math.min(1, maxW / img.height);
+      c.width = img.height * sc3; c.height = img.width * sc3;
+      ctx.translate(c.width / 2, c.height / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.drawImage(img, -img.width * sc3 / 2, -img.height * sc3 / 2, img.width * sc3, img.height * sc3);
+    }
+    return c;
+  }
+
+  $('scanFile').addEventListener('change', function () {
+    if (!this.files || !this.files.length) { toast('未取得照片'); return; }
+    var file = this.files[0];
+    toast('辨識中…');
+
+    var url = URL.createObjectURL(file);
+    var img = new Image();
+    img.onload = function () {
+      var modes = ['full', 'center', 'rotate90'];
+      var i = 0;
+      function next() {
+        if (i >= modes.length) {
+          URL.revokeObjectURL(url);
+          toast('辨識不到條碼:條碼放大置中、對焦清楚再拍');
+          return;
+        }
+        var canvas = makeCanvas(img, modes[i++]);
+        decodeCanvas(canvas)
+          .then(function (t) { URL.revokeObjectURL(url); scanSuccess(t); })
+          .catch(function (e) {
+            if (e === 'no-lib') { URL.revokeObjectURL(url); toast('掃描元件載入失敗,請用鍵盤輸入'); return; }
+            next();
+          });
+      }
+      next();
+    };
+    img.onerror = function () {
+      URL.revokeObjectURL(url);
+      toast('照片讀取失敗,請再拍一次');
+    };
+    img.src = url;
+  });
+
+  // ── 條碼綁定 ──
+  var pendingBarcode = '';
+
+  function openBindPanel(barcode) {
+    pendingBarcode = barcode;
+    $('bindBarcodeText').textContent = barcode;
+    $('bindCode').value = '';
+    $('bindName').textContent = '輸入貨號後確認品名';
+    $('bindName').style.borderColor = 'var(--line)';
+    $('bindName').style.color = '#8a9a91';
+    $('bindConfirm').disabled = true;
+    $('bindOverlay').style.display = 'flex';
+    $('bindCode').focus();
+  }
+  function closeBindPanel() { $('bindOverlay').style.display = 'none'; }
+
+  $('bindCode').addEventListener('input', function () {
+    var c = this.value.trim();
+    var nameBox = $('bindName');
+    if (PRODUCTS[c]) {
+      nameBox.textContent = '✓ ' + PRODUCTS[c].n + '(允退 ' + (PRODUCTS[c].r || '未設定') + ')';
+      nameBox.style.borderColor = 'var(--green)';
+      nameBox.style.color = 'var(--green-dark)';
+      $('bindConfirm').disabled = false;
+    } else {
+      nameBox.textContent = c ? '✗ 查無此貨號' : '輸入貨號後確認品名';
+      nameBox.style.borderColor = c ? 'var(--red)' : 'var(--line)';
+      nameBox.style.color = c ? 'var(--red)' : '#8a9a91';
+      $('bindConfirm').disabled = true;
+    }
+  });
+
+  $('bindCancel').addEventListener('click', closeBindPanel);
+
+  $('bindConfirm').addEventListener('click', function () {
+    var btn = this;
+    var boundCode = $('bindCode').value.trim();
+    if (!PRODUCTS[boundCode] || !pendingBarcode) return;
+    btn.disabled = true; btn.textContent = '綁定中…';
+
+    apiPost({ action: 'bind', payload: { code: boundCode, barcode: pendingBarcode } })
+      .then(function () {
+        BARCODES[pendingBarcode] = boundCode; // 本機立即生效
+        closeBindPanel();
+        toast('✓ 條碼已綁定:' + PRODUCTS[boundCode].n);
+        $('code').value = pendingBarcode;
+        $('code').dispatchEvent(new Event('input')); // 重跑比對 → 直接帶出品名
+        btn.disabled = false; btn.textContent = '確認綁定';
+      })
+      .catch(function (e) {
+        toast('綁定失敗:' + e.message);
+        btn.disabled = false; btn.textContent = '確認綁定';
+      });
+  });
+
+  // ── 貨號比對 ──
+  var codeTimer;
+  $('code').addEventListener('input', function () {
+    var code = this.value.trim();
+    var fromBarcode = '';
+    // 輸入的是國際條碼 → 自動轉成貨號
+    if (code && !PRODUCTS[code]) {
+      var key = null;
+      if (BARCODES[code]) key = code;
+      // 主檔條碼為內部格式「1+真實條碼前12碼」,自動轉換比對
+      else if (/^\d{13}$/.test(code) && BARCODES['1' + code.slice(0, 12)]) key = '1' + code.slice(0, 12);
+      if (key) {
+        fromBarcode = code;
+        code = BARCODES[key];
+        this.value = code;
+      }
+    }
+    var card = $('nameCard');
+    matched = false;
+    existingExpiries = {};
+    hideHistory();
+    card.innerHTML = '';
+    if (!code) {
+      card.className = ''; card.textContent = '輸入貨號或掃條碼';
+    } else if (PRODUCTS[code]) {
+      matched = true;
+      var p = PRODUCTS[code];
+      card.className = 'ok';
+      var nm = document.createElement('div');
+      nm.textContent = '✓ ' + p.n;
+      card.appendChild(nm);
+      var rc = document.createElement('div');
+      rc.className = 'rcode';
+      rc.textContent = '允退標準:' + (p.r || '未設定') + (fromBarcode ? ' | 條碼 ' + fromBarcode + ' → 貨號 ' + code : '');
+      card.appendChild(rc);
+      // 延遲 0.4 秒再查後台,避免每個字元都打一次伺服器
+      clearTimeout(codeTimer);
+      codeTimer = setTimeout(function () { loadHistory(code); }, 400);
+    } else {
+      card.className = 'bad';
+      var msg = document.createElement('div');
+      msg.textContent = '✗ 查無此貨號/條碼,請確認';
+      card.appendChild(msg);
+      // 長度像條碼 → 提供綁定選項
+      if (/^\d{8,14}$/.test(code)) {
+        var bindBtn = document.createElement('button');
+        bindBtn.type = 'button';
+        bindBtn.textContent = '＋ 這是新條碼,綁定到貨號';
+        bindBtn.style.cssText = 'margin-top:8px;padding:9px 12px;font-size:14px;font-weight:700;color:#fff;background:var(--red);border:none;border-radius:8px;';
+        bindBtn.onclick = function () { openBindPanel(code); };
+        card.appendChild(bindBtn);
+      }
+    }
+    evalAllRows();
+    updateBtn();
+  });
+
+  // ── 後台既有紀錄 ──
+  function hideHistory() { $('history').style.display = 'none'; $('hBody').innerHTML = ''; }
+
+  function loadHistory(code) {
+    var token = ++historyToken;
+    if ($('code').value.trim() !== code) return;   // 已送出或已換貨號
+    $('history').style.display = 'block';
+    $('hTitle').textContent = '後台既有紀錄';
+    $('hBody').innerHTML = '<div class="h-empty">查詢中…</div>';
+
+    apiGet({ action: 'history', code: code })
+      .then(function (list) {
+        if (token !== historyToken) return;               // 已換貨號,丟棄舊結果
+        if ($('code').value.trim() !== code) return;
+        renderHistory(list);
+      })
+      .catch(function () {
+        if (token !== historyToken) return;
+        $('hBody').innerHTML = '<div class="h-empty">' +
+          (navigator.onLine === false ? '離線中,無法查詢後台紀錄(不影響登打)' : '查詢失敗(網路不穩),不影響登打') + '</div>';
+        if ($('code').value.trim() !== code) return;
+        existingExpiries = queuedExpiries(code);   // 至少比對手機內尚未上傳的
+        evalAllRows();
+      });
+  }
+
+  function stClass(st) {
+    if (st === '正常') return 'st-in';
+    if (st === '過允' || st === '本月退貨') return 'st-over';
+    return 'st-no';
+  }
+
+  function renderHistory(list) {
+    var body = $('hBody');
+    body.innerHTML = '';
+    existingExpiries = queuedExpiries($('code').value.trim());   // 手機內尚未上傳的也算進去
+
+    if (!list.length) {
+      $('hTitle').textContent = '後台既有紀錄:無';
+      body.innerHTML = '<div class="h-empty">此貨號後台尚無登打資料</div>';
+      evalAllRows();
+      return;
+    }
+
+    $('hTitle').textContent = '後台既有紀錄:' + list.length + ' 筆' + (list.length >= 30 ? '(僅顯示最近30)' : '');
+    list.forEach(function (it) {
+      existingExpiries[it.expiry] = (existingExpiries[it.expiry] || 0) + 1;
+      var div = document.createElement('div');
+      div.className = 'h-item';
+      var left = document.createElement('div');
+      var exp = document.createElement('span');
+      exp.className = 'exp';
+      exp.textContent = '效期 ' + it.expiry;
+      left.appendChild(exp);
+      left.appendChild(document.createTextNode((it.qty ? ' × ' + it.qty : '') + ' '));
+      if (it.status) {
+        var st = document.createElement('span');
+        st.className = stClass(it.status);
+        st.textContent = it.status;
+        left.appendChild(st);
+      }
+      if (it.note) {
+        var nb = document.createElement('div');
+        nb.style.fontSize = '12px'; nb.style.color = '#6b7a72';
+        nb.textContent = '📝 ' + it.note;
+        left.appendChild(nb);
+      }
+      var who = document.createElement('div');
+      who.className = 'who';
+      who.textContent = it.date + ' ' + it.user + (it.area ? ' ' + it.area : '');
+      div.appendChild(left); div.appendChild(who);
+      body.appendChild(div);
+    });
+    evalAllRows(); // 更新各效期列的重複警告
+  }
+
+  // ── 效期格式 (4碼YYMM 或 6碼YYMMDD) ──
+  function expiryValid(v) {
+    if (!/^\d{4}$/.test(v) && !/^\d{6}$/.test(v)) return false;
+    var mm = parseInt(v.slice(2, 4), 10);
+    if (mm < 1 || mm > 12) return false;
+    if (v.length === 6) {
+      var dd = parseInt(v.slice(4, 6), 10);
+      if (dd < 1 || dd > 31) return false;
+    }
+    return true;
+  }
+  function expiryText(v) {
+    var t = '20' + v.slice(0, 2) + '年' + parseInt(v.slice(2, 4), 10) + '月';
+    if (v.length === 6) t += parseInt(v.slice(4, 6), 10) + '日';
+    return t;
+  }
+
+  // ── 允退狀態判斷 ──
+  // 允退代號說明:
+  //   物流 *N:*0=前1個月,*1=前3個月,*2=前4個月…(*N = 前N+2個月);*14/*15=不須退;*16=不可退
+  //   廠商 ^N/#N:前N個月;16=不可退
+  function lastDay(y, m) { return new Date(y, m, 0); }
+  function fmtDate(dt) {
+    return dt.getFullYear() + '/' + (dt.getMonth() + 1) + '/' + dt.getDate();
+  }
+  function judge(expiry) {
+    var code = $('code').value.trim();
+    if (!matched) return null;
+    var r = (PRODUCTS[code].r || '').trim();
+    var m = r.match(/^([*^#])(\d+)$/);
+    if (!m) {
+      return { cls: 'no', main: '無法判斷', sub: '允退代號「' + (r || '空白') + '」無法解析', allowDate: '', status: '無法判斷' };
+    }
+    var prefix = m[1];
+    var n = parseInt(m[2], 10);
+
+    if (n === 16) return { cls: 'no', main: '不可退 (' + r + ')', sub: '任何情況均不可退回', allowDate: '', status: '不可退' };
+    if (prefix === '*' && (n === 14 || n === 15)) {
+      return { cls: 'free', main: '不須退 (' + r + ')', sub: n === 14 ? '無效期商品(器材類)' : '自動補充商品', allowDate: '', status: '不須退' };
+    }
+
+    // 換算往前推的月數
+    var offset;
+    if (prefix === '*') offset = (n === 0) ? 1 : n + 2;
+    else offset = n;
+
+    var ey = 2000 + parseInt(expiry.slice(0, 2), 10);
+    var em = parseInt(expiry.slice(2, 4), 10);
+    var allow = lastDay(ey, em - offset);
+    var allowStr = fmtDate(allow);
+
+    var today = new Date();
+    // 用「月份差」判斷狀態
+    var diff = (allow.getFullYear() - today.getFullYear()) * 12 + (allow.getMonth() - today.getMonth());
+
+    if (diff < 0)  return { cls: 'over',   main: '✗ 過允',      sub: '允退日 ' + allowStr + ' 已過(' + r + ' 前' + offset + '個月退)', allowDate: allowStr, status: '過允' };
+    if (diff === 0) return { cls: 'm0',    main: '⚠ 本月退貨',  sub: '允退日:' + allowStr + '(' + r + ' 前' + offset + '個月退)', allowDate: allowStr, status: '本月退貨' };
+    if (diff === 1) return { cls: 'm1',    main: '下個月退貨',  sub: '允退日:' + allowStr + '(' + r + ' 前' + offset + '個月退)', allowDate: allowStr, status: '下個月退貨' };
+    if (diff === 2) return { cls: 'm2',    main: '下下個月退貨', sub: '允退日:' + allowStr + '(' + r + ' 前' + offset + '個月退)', allowDate: allowStr, status: '下下個月退貨' };
+    return { cls: 'in', main: '✓ 正常', sub: '允退日:' + allowStr + '(' + r + ' 前' + offset + '個月退)', allowDate: allowStr, status: '正常' };
+  }
+
+  // ── 效期列管理 ──
+  function addRow() {
+    var row = document.createElement('div');
+    row.className = 'exp-row';
+
+    var rm = document.createElement('button');
+    rm.type = 'button'; rm.className = 'rm'; rm.textContent = '✕';
+    rm.onclick = function () { row.remove(); refreshRemovable(); updateBtn(); };
+
+    var inputs = document.createElement('div');
+    inputs.className = 'inputs';
+
+    var fExp = document.createElement('div'); fExp.className = 'f-exp';
+    var lExp = document.createElement('label');
+    lExp.textContent = '效期 (YYMM/YYMMDD)';
+    var iExp = document.createElement('input');
+    iExp.type = 'text'; iExp.inputMode = 'numeric'; iExp.maxLength = 6;
+    iExp.placeholder = '2712 或 271215'; iExp.autocomplete = 'off';
+    iExp.className = 'i-exp';
+    var hint = document.createElement('div'); hint.className = 'hint';
+    fExp.appendChild(lExp); fExp.appendChild(iExp); fExp.appendChild(hint);
+
+    var fQty = document.createElement('div'); fQty.className = 'f-qty';
+    var lQty = document.createElement('label'); lQty.textContent = '數量';
+    var iQty = document.createElement('input');
+    iQty.type = 'number'; iQty.inputMode = 'numeric'; iQty.placeholder = '必填'; iQty.min = '0';
+    iQty.className = 'i-qty';
+    iQty.addEventListener('input', updateBtn);
+    fQty.appendChild(lQty); fQty.appendChild(iQty);
+
+    inputs.appendChild(fExp); inputs.appendChild(fQty);
+
+    // 備註欄 (選填)
+    var fNote = document.createElement('div');
+    fNote.style.marginTop = '8px';
+    var iNote = document.createElement('input');
+    iNote.type = 'text'; iNote.placeholder = '備註 (選填)'; iNote.autocomplete = 'off';
+    iNote.className = 'i-note';
+    iNote.style.fontSize = '15px'; iNote.style.padding = '9px 12px';
+    fNote.appendChild(iNote);
+
+    var dup = document.createElement('div'); dup.className = 'dup';
+    var status = document.createElement('div'); status.className = 'status';
+
+    iExp.addEventListener('input', function () { evalRow(row); updateBtn(); });
+
+    row.appendChild(rm); row.appendChild(inputs); row.appendChild(fNote); row.appendChild(dup); row.appendChild(status);
+    $('expRows').appendChild(row);
+    refreshRemovable();
+    updateBtn();
+    return row;
+  }
+
+  function refreshRemovable() {
+    var rows = document.querySelectorAll('.exp-row');
+    rows.forEach(function (r) {
+      if (rows.length > 1) r.classList.add('removable');
+      else r.classList.remove('removable');
+    });
+  }
+
+  function evalRow(row) {
+    var iExp = row.querySelector('.i-exp');
+    var hint = row.querySelector('.hint');
+    var status = row.querySelector('.status');
+    var dup = row.querySelector('.dup');
+    var v = iExp.value.trim();
+    row.dataset.allowDate = ''; row.dataset.status = '';
+    dup.className = 'dup'; dup.textContent = '';
+
+    if (!v) {
+      hint.className = 'hint'; hint.textContent = '';
+      status.className = 'status'; status.innerHTML = '';
+      return;
+    }
+    if (!expiryValid(v)) {
+      hint.className = 'hint err'; hint.textContent = '格式錯誤:YYMM 或 YYMMDD,月01–12';
+      status.className = 'status'; status.innerHTML = '';
+      return;
+    }
+    hint.className = 'hint'; hint.textContent = '= ' + expiryText(v);
+
+    // 重複警告:後台已有相同貨號+效期
+    if (existingExpiries[v]) {
+      dup.className = 'dup show';
+      dup.textContent = '⚠ 此效期已登打過 ' + existingExpiries[v] + ' 筆(含尚未上傳),注意是否重複登打';
+    }
+
+    var res = judge(v);
+    status.innerHTML = '';
+    if (!res) { status.className = 'status'; return; }
+    status.className = 'status ' + res.cls;
+    var main = document.createElement('div'); main.textContent = res.main;
+    var sub = document.createElement('div'); sub.className = 'sub'; sub.textContent = res.sub;
+    status.appendChild(main); status.appendChild(sub);
+    row.dataset.allowDate = res.allowDate;
+    row.dataset.status = res.status;
+  }
+
+  function evalAllRows() {
+    document.querySelectorAll('.exp-row').forEach(evalRow);
+  }
+
+  $('addExp').addEventListener('click', function () {
+    var row = addRow();
+    evalRow(row);
+    row.querySelector('.i-exp').focus();
+  });
+
+  // ── 送出條件 ──
+  function collectItems() {
+    var items = [];
+    var allValid = true;
+    document.querySelectorAll('.exp-row').forEach(function (row) {
+      var v = row.querySelector('.i-exp').value.trim();
+      var q = row.querySelector('.i-qty').value.trim();
+      var nt = row.querySelector('.i-note').value.trim();
+      if (!v || !expiryValid(v) || q === '') { allValid = false; return; }
+      items.push({
+        expiry: v,
+        qty: q,
+        note: nt,
+        allowDate: row.dataset.allowDate || '',
+        status: row.dataset.status || ''
+      });
+    });
+    return allValid && items.length ? items : null;
+  }
+
+  function updateBtn() {
+    $('submitBtn').disabled = !(matched && collectItems() && $('user').value.trim() && (!AREA_REQUIRED || $('area').value));
+  }
+  $('user').addEventListener('input', updateBtn);
+
+  // ── 送出:先存進手機的「待上傳清單」,再背景上傳 (網路不好、關掉頁面都不會遺失) ──
+  var QUEUE_KEY = 'queue_' + SID;
+  var QUEUE = [];            // [{ payload:{cid,user,code,name,area,items}, t:時間, err:後台拒絕原因 }]
+  var flushing = false;
+  var syncState = '';        // '' 待上傳 | 'up' 上傳中 | 'ok' 完成 | 'fail' 失敗
+  var syncMsg = '';
+  var okTimer;
+  var listOpen = false;
+
+  function readQueue() {
+    try {
+      var q = JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]');
+      return Array.isArray(q) ? q.filter(function (x) { return x && x.payload && x.payload.items && x.payload.items.length; }) : [];
+    } catch (e) { return []; }
+  }
+  function saveQueue() {
+    try { localStorage.setItem(QUEUE_KEY, JSON.stringify(QUEUE)); } catch (e) {}
+  }
+  QUEUE = readQueue();
+
+  function queueCount() {
+    return QUEUE.reduce(function (n, it) { return n + it.payload.items.length; }, 0);
+  }
+  /** 手機內尚未上傳的資料中,這個貨號各效期的筆數 */
+  function queuedExpiries(code) {
+    var out = {};
+    QUEUE.forEach(function (it) {
+      if (it.payload.code !== code) return;
+      it.payload.items.forEach(function (i) { out[i.expiry] = (out[i.expiry] || 0) + 1; });
+    });
+    return out;
+  }
+  function newCid() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return 'c' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+  }
+
+  function enqueue(payload) {
+    payload.cid = newCid();    // 這批資料的編號:重傳時後台靠它避免重複寫入
+    QUEUE.push({ payload: payload, t: Date.now(), err: '' });
+    saveQueue();
+    if (syncState !== 'up') syncState = '';
+    renderSync();
+    flushQueue(false);
+  }
+
+  function renderSync() {
+    var bar = $('syncBar'), n = queueCount();
+    clearTimeout(okTimer);
+    if (!n && syncState !== 'ok') { bar.className = ''; listOpen = false; return; }
+    var cls, text, btnText = '立即上傳', showBtn = true, dis = false;
+    if (syncState === 'up') { cls = 'up'; text = syncMsg; btnText = '上傳中…'; dis = true; }
+    else if (!n) { cls = 'ok'; text = syncMsg; showBtn = false; }
+    else if (syncState === 'fail') { cls = 'fail'; text = syncMsg; btnText = '再試一次'; }
+    else { cls = 'wait'; text = '⚠ 有 ' + n + ' 筆尚未上傳'; }
+    bar.className = 'show ' + cls;
+    $('syncText').textContent = text;
+    $('syncBtn').textContent = btnText;
+    $('syncBtn').disabled = dis;
+    $('syncBtn').style.display = showBtn ? '' : 'none';
+    $('syncDetail').textContent = n ? (listOpen ? '收起明細' : '資料已存在手機內,點此看明細') : '';
+
+    var list = $('syncList');
+    list.innerHTML = '';
+    list.className = (listOpen && n) ? 'open' : '';
+    if (listOpen && n) {
+      QUEUE.forEach(function (it) {
+        var div = document.createElement('div');
+        div.className = 'sl-item';
+        var info = document.createElement('div');
+        info.textContent = (it.payload.name || it.payload.code) + '(效期 ' +
+          it.payload.items.map(function (i) { return i.expiry + '×' + i.qty; }).join('、') + ')';
+        if (it.err) {
+          var er = document.createElement('div');
+          er.className = 'sl-err';
+          er.textContent = '後台拒絕:' + it.err;
+          info.appendChild(er);
+        }
+        var del = document.createElement('button');
+        del.type = 'button'; del.textContent = '刪除';
+        del.disabled = flushing;
+        del.onclick = function () {
+          if (flushing) return;
+          if (!confirm('這筆還沒上傳,確定要刪除?\n' + info.textContent)) return;
+          QUEUE = QUEUE.filter(function (x) { return x.payload.cid !== it.payload.cid; });
+          saveQueue();
+          if (!QUEUE.length) syncState = '';
+          renderSync();
+        };
+        div.appendChild(info); div.appendChild(del);
+        list.appendChild(div);
+      });
+    }
+    if (cls === 'ok') okTimer = setTimeout(function () { if (syncState === 'ok') { syncState = ''; renderSync(); } }, 5000);
+  }
+
+  /** 把待上傳清單逐筆送到後台。manual=true 表示使用者按了按鈕 (失敗時要明確告知) */
+  function flushQueue(manual) {
+    if (flushing) return;
+    if (!QUEUE.length) { renderSync(); return; }
+    if (navigator.onLine === false) {
+      if (manual) { syncState = 'fail'; syncMsg = '目前沒有網路,請到訊號好的地方再按一次'; renderSync(); }
+      return;
+    }
+    flushing = true;
+    var cids = QUEUE.map(function (it) { return it.payload.cid; });
+    var idx = 0, sent = 0, netFail = false, keyFail = false;
+
+    function finish() {
+      flushing = false;
+      var left = queueCount();
+      if (!left) {
+        syncState = 'ok';
+        syncMsg = '✓ ' + sent + ' 筆已全部上傳';
+        if (navigator.vibrate) navigator.vibrate(60);
+      } else if (keyFail) {
+        syncState = 'fail'; syncMsg = '通行碼錯誤,無法上傳。請重新整理頁面後輸入通行碼';
+      } else if (netFail) {
+        // 自動補傳失敗就維持橘色「尚未上傳」,只有手動按才顯示紅色失敗
+        syncState = manual ? 'fail' : '';
+        syncMsg = '上傳失敗,請到訊號好的地方再按一次';
+      } else {
+        var rej = QUEUE.filter(function (it) { return it.err; });
+        syncState = 'fail';
+        syncMsg = '有 ' + left + ' 筆被後台拒絕:' + (rej.length ? rej[0].err : '') + '(請通知店長)';
+        if (manual && navigator.vibrate) navigator.vibrate([100, 50, 100]);
+      }
+      renderSync();
+      if (sent) loadToday();
+    }
+
+    function step() {
+      if (idx >= cids.length) { finish(); return; }
+      var cid = cids[idx++];
+      var item = null;
+      QUEUE.forEach(function (it) { if (it.payload.cid === cid) item = it; });
+      if (!item) { step(); return; }
+      syncState = 'up';
+      syncMsg = '上傳中… ' + sent + '/' + (sent + queueCount());
+      renderSync();
+      apiPost({ action: 'submit', payload: item.payload }, 30000)
+        .then(function () {
+          sent += item.payload.items.length;
+          QUEUE = QUEUE.filter(function (x) { return x.payload.cid !== cid; });
+          saveQueue();
+          step();
+        })
+        .catch(function (e) {
+          if (e && e.keyInvalid) { keyFail = true; finish(); return; }
+          if (e && e.api) {            // 後台有回應但拒絕 → 記下原因,繼續傳下一筆
+            item.err = e.message || '未知原因';
+            saveQueue();
+            step();
+            return;
+          }
+          netFail = true;              // 網路問題 → 後面的也不用試了
+          finish();
+        });
+    }
+    step();
+  }
+
+  $('syncBtn').addEventListener('click', function () { flushQueue(true); });
+  $('syncDetail').addEventListener('click', function (e) { e.preventDefault(); listOpen = !listOpen; renderSync(); });
+
+  // 自動補傳時機:恢復網路、回到這個頁面、每 30 秒
+  window.addEventListener('online', function () { flushQueue(false); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) flushQueue(false); });
+  setInterval(function () { if (QUEUE.length && !document.hidden) flushQueue(false); }, 30000);
+  // 同一支手機開了兩個分頁時,清單保持一致
+  window.addEventListener('storage', function (e) {
+    if (e.key === QUEUE_KEY && !flushing) { QUEUE = readQueue(); renderSync(); }
+  });
+  // 還有資料沒上傳就要離開頁面 → 提醒 (Android 有效;iPhone 不一定會跳)
+  window.addEventListener('beforeunload', function (e) {
+    if (QUEUE.length) { e.preventDefault(); e.returnValue = ''; }
+  });
+  renderSync();
+
+  $('submitBtn').addEventListener('click', function () {
+    var items = collectItems();
+    if (!items) return;
+
+    var user = $('user').value.trim();
+    localStorage.setItem('entryUser', user);
+
+    var code = $('code').value.trim();
+    var payload = {
+      user: user,
+      code: code,
+      name: PRODUCTS[code] ? PRODUCTS[code].n : '',
+      area: $('area').value,
+      items: items
+    };
+
+    // 立即重置畫面,可馬上打下一筆
+    toast('✓ 已登打 ' + items.length + ' 筆:' + payload.name);
+    $('code').value = '';
+    $('nameCard').className = ''; $('nameCard').textContent = '輸入貨號或掃條碼';
+    hideHistory();
+    existingExpiries = {};
+    $('expRows').innerHTML = '';
+    matched = false;
+    addRow();
+    updateBtn();
+    $('code').focus();
+
+    // 先存進手機的待上傳清單,再背景上傳
+    enqueue(payload);
+  });
+
+  // ── 今日紀錄 ──
+  function loadToday() {
+    apiGet({ action: 'today' }).then(render).catch(function () {});
+  }
+  $('refresh').addEventListener('click', function (e) { e.preventDefault(); loadToday(); });
+
+  function render(list) {
+    var box = $('entries');
+    if (!list.length) { box.innerHTML = '<div class="empty">尚無紀錄</div>'; return; }
+    box.innerHTML = '';
+    list.forEach(function (it) {
+      var div = document.createElement('div');
+      div.className = 'entry';
+      var info = document.createElement('div');
+      info.className = 'info';
+      var nm = document.createElement('div');
+      nm.className = 'name';
+      nm.textContent = it.code + ' ' + it.name;
+      var mt = document.createElement('div');
+      mt.className = 'meta';
+      mt.textContent = '效期 ' + it.expiry + (it.qty ? ' × ' + it.qty : '') + (it.area ? ' | ' + it.area : '') + ' | ' + it.time + ' ' + it.user + ' | ';
+      if (it.status) {
+        var st = document.createElement('span');
+        st.className = stClass(it.status);
+        st.textContent = it.status;
+        mt.appendChild(st);
+      }
+      if (it.note) {
+        var nb = document.createElement('div');
+        nb.style.fontSize = '12px'; nb.style.color = '#6b7a72'; nb.style.marginTop = '2px';
+        nb.textContent = '📝 ' + it.note;
+        mt.appendChild(nb);
+      }
+      info.appendChild(nm); info.appendChild(mt);
+      var del = document.createElement('button');
+      del.className = 'del'; del.textContent = '刪除';
+      del.onclick = function () {
+        if (!confirm('刪除這筆?\n' + it.code + ' ' + it.name + ' 效期' + it.expiry)) return;
+        del.disabled = true; del.textContent = '…';
+        apiGet({ action: 'delete', id: it.id })
+          .then(function () { toast('已刪除'); loadToday(); })
+          .catch(function () { toast('刪除失敗'); del.disabled = false; del.textContent = '刪除'; });
+      };
+      div.appendChild(info); div.appendChild(del);
+      box.appendChild(div);
+    });
+  }
+
+  // ── 提示 ──
+  var toastTimer;
+  function toast(msg) {
+    var t = $('toast');
+    t.textContent = msg; t.className = 'show';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.className = ''; }, 2200);
+  }
+</script>
+</body>
+</html>
