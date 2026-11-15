@@ -428,6 +428,19 @@
 
 <div id="toast"></div>
 
+<div id="newsOverlay" style="display:none; position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.6); align-items:center; justify-content:center; padding:20px;">
+  <div style="background:#fff; border-radius:16px; padding:22px 20px 18px; width:100%; max-width:420px;">
+    <div style="font-size:21px; font-weight:700; color:var(--green-dark); margin-bottom:4px;">🎉 效期登打更新了!</div>
+    <div style="font-size:14px; color:#6b7a72; margin-bottom:14px;">網路不好的地方,現在也能安心登打</div>
+    <div style="font-size:15.5px; line-height:1.75; color:var(--ink);">
+      <div><b>① 沒網路也能掃、也能送出</b><br><span style="color:#4c5a53;">資料會先存在這支手機,不會不見。</span></div>
+      <div style="margin-top:10px;"><b>② 上方出現<span style="color:#c26a00;">橘色「尚未上傳」</span></b><br><span style="color:#4c5a53;">走到訊號好的地方打開這個頁面,會自動補傳;也可以按「立即上傳」。</span></div>
+      <div style="margin-top:10px;"><b>③ 看到<span style="color:var(--green);">綠色「已全部上傳」</span>才算完成</b><br><span style="color:#4c5a53;">橘色橫條還在時,請不要清除瀏覽器資料。</span></div>
+    </div>
+    <button id="newsOk" type="button" class="submit" style="margin-top:18px;">我知道了</button>
+  </div>
+</div>
+
 <div id="bindOverlay" style="display:none; position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.6); align-items:center; justify-content:center; padding:20px;">
   <div style="background:#fff; border-radius:14px; padding:18px; width:100%; max-width:420px;">
     <div style="font-size:16px; font-weight:700; color:var(--green-dark); margin-bottom:4px;">綁定新條碼</div>
@@ -512,7 +525,20 @@
     $('form').style.display = 'block';
     if (!booted) { booted = true; addRow(); }
     updateBtn();
+    showNewsOnce();
   }
+
+  // ── 更新公告:每支手機只顯示一次。之後要發新公告,改 NEWS_ID 和上面的文字即可 ──
+  var NEWS_ID = '2026-11-offline';
+  function showNewsOnce() {
+    if (lsGet('newsSeen') === NEWS_ID) return;
+    $('newsOverlay').style.display = 'flex';
+  }
+  $('newsOk').addEventListener('click', function () {
+    lsSet('newsSeen', NEWS_ID);
+    $('newsOverlay').style.display = 'none';
+  });
+
   function netNote(text) {
     var el = $('netNote');
     el.textContent = text || '';
